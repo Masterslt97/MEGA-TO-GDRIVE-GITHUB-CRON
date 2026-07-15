@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MEGA to Google Drive transfer. Quota hit pe exit, cron 1 min baad resume."""
+"""MEGA to Google Drive transfer. 7 min run → 1 min off → repeat."""
 
 import json
 import os
@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 import hashlib
+from datetime import datetime, timedelta
 
 MEGA_LINKS_RAW = os.environ.get("MEGA_LINKS", "")
 RCLONE_CONF = os.environ.get("RCLONE_CONF", "")
@@ -19,10 +20,13 @@ WORKSPACE = os.environ.get("GITHUB_WORKSPACE", os.getcwd())
 STATE_FILE = os.path.join(WORKSPACE, "mega_transfer_state.json")
 TEMP_DIR = os.path.join(WORKSPACE, "mega_temp")
 MAX_RETRIES = 3
+RUN_SECONDS = 420  # 7 minutes
 QUOTA_MARKERS = ["over quota", "bandwidth limit", "quota exceeded", "429", "eoverquota"]
 
-# Counters
 stats = {"downloaded": 0, "skipped": 0, "failed": 0}
+total_bytes_downloaded = 0
+speed_start_time = time.time()
+speed_start_bytes = 0
 
 
 def link_id(url):
@@ -32,6 +36,26 @@ def link_id(url):
 
 def is_quota(text):
     return any(m in text.lower() for m in QUOTA_MARKERS)
+
+
+def fmt_size(b):
+    if b >= 1024 * 1024:
+        return f"{b / (1024 * 1024):.1f} MB"
+    elif b >= 1024:
+        return f"{b / 1024:.1f} KB"
+    return f"{b} B"
+
+
+def get_speed():
+    elapsed = time.time() - speed_start_time
+    if elapsed < 1:
+        return "0 B/s"
+    speed = (total_bytes_downloaded - speed_start_bytes) / elapsed
+    if speed >= 1024 * 1024:
+        return f"{speed / (1024 * 1024):.1f} MB/s"
+    elif speed >= 1024:
+        return f"{speed / 1024:.1f} KB/s"
+    return f"{speed:.0f} B/s"
 
 
 def load_state():
@@ -75,6 +99,7 @@ def scan_drive():
 
 
 def download(url):
+    global total_bytes_downloaded
     if os.path.isdir(TEMP_DIR):
         shutil.rmtree(TEMP_DIR)
     os.makedirs(TEMP_DIR, exist_ok=True)
@@ -84,28 +109,39 @@ def download(url):
     files = [f for f in os.listdir(TEMP_DIR) if os.path.isfile(os.path.join(TEMP_DIR, f))]
     if not files:
         raise RuntimeError("No file downloaded")
-    return os.path.join(TEMP_DIR, files[0])
+    fpath = os.path.join(TEMP_DIR, files[0])
+    total_bytes_downloaded += os.path.getsize(fpath)
+    return fpath
 
 
 def upload(local):
-    r = subprocess.run(["rclone", "copy", local, f"{GDRIVE_REMOTE}:{GDRIVE_FOLDER}/", "--progress"],
+    fname = os.path.basename(local)
+    r = subprocess.run(["rclone", "copy", local, f"{GDRIVE_REMOTE}:{GDRIVE_FOLDER}/"],
                         capture_output=True, text=True, timeout=3600)
     if r.returncode != 0:
         raise RuntimeError(f"rclone failed: {(r.stdout + r.stderr)[:300]}")
-    return os.path.basename(local)
+    # Verify on remote
+    check = subprocess.run(["rclone", "ls", f"{GDRIVE_REMOTE}:{GDRIVE_FOLDER}/{fname}"],
+                            capture_output=True, text=True, timeout=30)
+    if not check.stdout.strip():
+        raise RuntimeError(f"Upload returned OK but file NOT on remote: {fname}")
+    return fname
 
 
-def show_progress(current, total):
-    """Show clear progress with filled bar."""
+def show_status(current, total):
     pct = (current / total * 100) if total > 0 else 0
     bar_len = 30
     filled = int(bar_len * current / total) if total > 0 else 0
     bar = "█" * filled + "░" * (bar_len - filled)
+    speed = get_speed()
     print(f"  🟢 Done: {stats['downloaded']}  🟡 Skip: {stats['skipped']}  🔴 Fail: {stats['failed']}", flush=True)
+    print(f"  ⚡ Speed: {speed}", flush=True)
     print(f"  [{bar}] {pct:.1f}%  ({current}/{total})", flush=True)
 
 
 def main():
+    global total_bytes_downloaded, speed_start_time, speed_start_bytes
+
     links = [l.strip() for l in MEGA_LINKS_RAW.splitlines() if l.strip()]
     valid = [l for l in links if "mega.nz/file/" in l]
     if not valid:
@@ -135,65 +171,76 @@ def main():
 
     total = len(valid)
     done_so_far = stats["skipped"]
+    run_end = datetime.now() + timedelta(seconds=RUN_SECONDS)
 
     print(f"{'═' * 50}", flush=True)
     print(f"  🟢 MEGA -> Google Drive Transfer", flush=True)
-    print(f"  Total: {total} | Skipped: {stats['skipped']} | Pending: {len(pending)}", flush=True)
+    print(f"  Total: {total} | Pending: {len(pending)}", flush=True)
+    print(f"  ⏱️  Run for {RUN_SECONDS//60} min, then pause 1 min", flush=True)
+    print(f"  🏁 Stop at: {run_end.strftime('%H:%M:%S')}", flush=True)
     print(f"{'═' * 50}\n", flush=True)
 
-    # Show initial progress if some are already done
     if done_so_far > 0:
-        show_progress(done_so_far, total)
+        show_status(done_so_far, total)
         print(flush=True)
 
     if not pending:
         print(f"\n🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢", flush=True)
-        print(f"🟢                                      🟢", flush=True)
         print(f"🟢   HURRY 🎉 {total} FILES TRANSFERRED     🟢", flush=True)
         print(f"🟢   TO GDRIVE! WAh 🎉                  🟢", flush=True)
-        print(f"🟢                                      🟢", flush=True)
         print(f"🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢", flush=True)
         return
 
+    speed_start_time = time.time()
+    speed_start_bytes = 0
+
     for i, url in enumerate(pending, 1):
+        # Time check
+        if datetime.now() >= run_end:
+            print(f"\n⏱️  7 min window over. Exiting. Cron resumes in 1 min.", flush=True)
+            show_status(done_so_far, total)
+            sys.exit(0)
+
         key = link_id(url)
         fname, size = get_metadata(url)
 
-        # Already in Drive
+        # Skip if already in Drive
         if fname and drive.get(fname) == size:
             state[key] = {"filename": fname, "size": size, "status": "completed"}
             save_state(state); drive[fname] = size
             stats["skipped"] += 1
             done_so_far += 1
-            print(f"🟡 [{key}] '{fname}' — skip (already in Drive)", flush=True)
-            show_progress(done_so_far, total)
+            print(f"🟡 [{key}] '{fname}' — skip", flush=True)
+            show_status(done_so_far, total)
             print(flush=True)
             continue
 
-        # Download
-        print(f"⬇️  [{key}] downloading '{fname}' ({size} bytes)... [{i}/{len(pending)}]", flush=True)
+        # Download + Upload
+        print(f"⬇️  [{key}] downloading '{fname}' ({fmt_size(size)})... [{i}/{len(pending)}]", flush=True)
         success = False
         for attempt in range(1, MAX_RETRIES + 1):
             try:
+                print(f"  📥 Downloading...", flush=True)
                 local = download(url)
-                name = upload(local)
                 sz = os.path.getsize(local)
+                print(f"  📤 Uploading to GDrive...", flush=True)
+                name = upload(local)
                 state[key] = {"filename": name, "size": sz, "status": "completed"}
                 save_state(state); drive[name] = sz
                 stats["downloaded"] += 1
                 done_so_far += 1
-                print(f"🟢 [{key}] '{name}' ({sz} bytes) — DONE", flush=True)
-                show_progress(done_so_far, total)
+                print(f"  ✅ [{key}] '{name}' ({fmt_size(sz)}) — DONE", flush=True)
+                show_status(done_so_far, total)
                 print(flush=True)
                 success = True
                 break
             except RuntimeError as e:
                 msg = str(e)
                 if is_quota(msg):
-                    print(f"\n🔴 [{key}] QUOTA HIT — exiting. Cron resumes in 1 min.", flush=True)
-                    show_progress(done_so_far, total)
+                    print(f"\n🔴 [{key}] QUOTA HIT — exiting. Resumes in 1 min.", flush=True)
+                    show_status(done_so_far, total)
                     sys.exit(0)
-                print(f"🔴 [{key}] attempt {attempt}/{MAX_RETRIES}: {msg[:150]}", flush=True)
+                print(f"  🔴 Attempt {attempt}/{MAX_RETRIES}: {msg[:150]}", flush=True)
                 if attempt < MAX_RETRIES:
                     time.sleep(5 * attempt)
 
@@ -201,38 +248,28 @@ def main():
             stats["failed"] += 1
             state[key] = {"filename": None, "size": None, "status": "failed"}
             save_state(state)
-            print(f"🔴 [{key}] FAILED after {MAX_RETRIES} attempts", flush=True)
-            show_progress(done_so_far, total)
+            print(f"  ❌ [{key}] FAILED after {MAX_RETRIES} attempts", flush=True)
+            show_status(done_so_far, total)
             print(flush=True)
 
         if os.path.isdir(TEMP_DIR):
             shutil.rmtree(TEMP_DIR)
 
-    # Final report
+    # Final
     completed = sum(1 for v in load_state().values() if v.get("status") == "completed")
     print(f"\n{'═' * 50}", flush=True)
-    print(f"  📊 FINAL REPORT", flush=True)
+    print(f"  📊 RUN REPORT", flush=True)
     print(f"  🟢 Downloaded : {stats['downloaded']}", flush=True)
     print(f"  🟡 Skipped    : {stats['skipped']}", flush=True)
     print(f"  🔴 Failed     : {stats['failed']}", flush=True)
-    print(f"  Total done    : {completed}/{total}", flush=True)
-
-    # Graph
-    bar_len = 40
-    g = int(bar_len * stats['downloaded'] / total) if total else 0
-    y = int(bar_len * stats['skipped'] / total) if total else 0
-    r = bar_len - g - y
-    graph = "🟢" * g + "🟡" * y + "🔴" * max(r, 0)
-    print(f"\n  {graph}", flush=True)
-    print(f"  🟢=Downloaded 🟡=Skipped 🔴=Failed", flush=True)
+    print(f"  ⚡ Total data : {fmt_size(total_bytes_downloaded)}", flush=True)
+    print(f"  📁 Total done : {completed}/{total}", flush=True)
     print(f"{'═' * 50}", flush=True)
 
     if completed >= total:
         print(f"\n🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢", flush=True)
-        print(f"🟢                                      🟢", flush=True)
         print(f"🟢   HURRY 🎉 {total} FILES TRANSFERRED     🟢", flush=True)
         print(f"🟢   TO GDRIVE! WAh 🎉                  🟢", flush=True)
-        print(f"🟢                                      🟢", flush=True)
         print(f"🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢", flush=True)
 
 

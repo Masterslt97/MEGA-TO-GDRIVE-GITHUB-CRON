@@ -2,12 +2,10 @@ name: MEGA to Google Drive Transfer
 
 on:
   schedule:
-    # Every minute
     - cron: '* * * * *'
 
   workflow_dispatch:
 
-# Only one run at a time — no parallel transfers
 concurrency:
   group: mega-transfer
   cancel-in-progress: false
@@ -18,7 +16,7 @@ permissions:
 jobs:
   transfer:
     runs-on: ubuntu-latest
-    timeout-minutes: 9
+    timeout-minutes: 8
 
     steps:
       - name: Checkout repo

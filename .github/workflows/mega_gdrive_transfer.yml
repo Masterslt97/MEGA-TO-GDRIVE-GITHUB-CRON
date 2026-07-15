@@ -2,10 +2,15 @@ name: MEGA to Google Drive Transfer
 
 on:
   schedule:
-    # Every minute — script handles 10s quota retry internally
+    # Every minute
     - cron: '* * * * *'
 
   workflow_dispatch:
+
+# Only one run at a time — no parallel transfers
+concurrency:
+  group: mega-transfer
+  cancel-in-progress: false
 
 permissions:
   contents: write

@@ -20,7 +20,7 @@ WORKSPACE = os.environ.get("GITHUB_WORKSPACE", os.getcwd())
 STATE_FILE = os.path.join(WORKSPACE, "mega_transfer_state.json")
 TEMP_DIR = os.path.join(WORKSPACE, "mega_temp")
 MAX_RETRIES = 3
-RUN_SECONDS = 999999  # continuous — no time limit
+RUN_SECONDS = 420  # 7 minutes
 QUOTA_MARKERS = ["over quota", "bandwidth limit", "quota exceeded", "429", "eoverquota"]
 
 stats = {"downloaded": 0, "skipped": 0, "failed": 0}

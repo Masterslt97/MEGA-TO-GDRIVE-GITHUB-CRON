@@ -6,10 +6,6 @@ on:
 
   workflow_dispatch:
 
-concurrency:
-  group: mega-transfer
-  cancel-in-progress: false
-
 permissions:
   contents: write
 

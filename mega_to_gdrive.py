@@ -122,11 +122,6 @@ def upload(local):
                         capture_output=True, text=True, timeout=3600)
     if r.returncode != 0:
         raise RuntimeError(f"rclone failed: {(r.stdout + r.stderr)[:300]}")
-    # Verify on remote
-    check = subprocess.run(["rclone", "ls", f"{GDRIVE_REMOTE}:{GDRIVE_FOLDER}/{fname}"],
-                            capture_output=True, text=True, timeout=30)
-    if not check.stdout.strip():
-        raise RuntimeError(f"Upload returned OK but file NOT on remote: {fname}")
     return fname
 
 

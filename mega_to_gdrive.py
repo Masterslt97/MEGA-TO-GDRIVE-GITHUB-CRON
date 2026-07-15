@@ -124,11 +124,20 @@ def upload(local):
     # Create folder if needed
     subprocess.run(["rclone", "mkdir", remote], capture_output=True, text=True, timeout=30)
 
-    # Upload with verbose
-    r = subprocess.run(["rclone", "copy", local, f"{remote}/", "-v"],
+    # Debug: show rclone config
+    cfg = subprocess.run(["rclone", "config", "show", GDRIVE_REMOTE],
+                          capture_output=True, text=True, timeout=10)
+    print(f"  📋 rclone config [{GDRIVE_REMOTE}]:", flush=True)
+    for line in cfg.stdout.strip().splitlines()[:5]:
+        print(f"     {line}", flush=True)
+
+    # Upload
+    r = subprocess.run(["rclone", "copy", local, f"{remote}/", "-vv"],
                         capture_output=True, text=True, timeout=3600)
+    print(f"  📤 rclone stdout: {r.stdout[:300]}", flush=True)
+    print(f"  📤 rclone stderr: {r.stderr[:300]}", flush=True)
     if r.returncode != 0:
-        raise RuntimeError(f"rclone copy FAILED: {(r.stdout + r.stderr)[:500]}")
+        raise RuntimeError(f"rclone copy FAILED (exit {r.returncode})")
 
     # Verify file exists on remote with size check
     check = subprocess.run(["rclone", "ls", f"{remote}/{fname}"],

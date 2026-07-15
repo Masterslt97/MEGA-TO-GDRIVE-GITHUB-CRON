@@ -141,16 +141,67 @@ def download(url):
 
 
 def get_gdrive_token():
-    """Get access token from rclone config."""
+    """Get fresh access token using refresh_token from rclone config."""
     import json as _json
+    import urllib.request, urllib.parse
+
+    # Get token data from rclone config
     r = subprocess.run(["rclone", "config", "show", GDRIVE_REMOTE],
                         capture_output=True, text=True, timeout=10)
+    print(f"  📋 rclone config output:", flush=True)
+    for line in r.stdout.strip().splitlines():
+        # Mask token but show key fields
+        if "token" in line.lower():
+            print(f"     [token field present]", flush=True)
+        else:
+            print(f"     {line}", flush=True)
+
+    refresh_token = ""
+    client_id = ""
+    client_secret = ""
+
     for line in r.stdout.splitlines():
-        if "token" in line and "access_token" in line:
+        line = line.strip()
+        if line.startswith("token") and "refresh_token" in line:
             token_str = line.split("=", 1)[1].strip()
             token_data = _json.loads(token_str)
-            return token_data.get("access_token", "")
-    return ""
+            refresh_token = token_data.get("refresh_token", "")
+        elif line.startswith("client_id"):
+            client_id = line.split("=", 1)[1].strip()
+        elif line.startswith("client_secret"):
+            client_secret = line.split("=", 1)[1].strip()
+
+    if not refresh_token:
+        raise RuntimeError("No refresh_token found in rclone config")
+
+    # Use rclone's built-in client_id if none specified
+    if not client_id:
+        client_id = "202264815644.apps.googleusercontent.com"
+        client_secret = "X4Z3ca8xfWDb1Voo-F9a7ZxJ"
+
+    # Refresh the token
+    data = urllib.parse.urlencode({
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "refresh_token": refresh_token,
+        "grant_type": "refresh_token"
+    }).encode()
+
+    print(f"  🔑 Refreshing token with client_id: {client_id[:20]}...", flush=True)
+    try:
+        req = urllib.request.Request("https://oauth2.googleapis.com/token", data=data)
+        resp = urllib.request.urlopen(req, timeout=30)
+        result = _json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        body = e.read().decode()
+        raise RuntimeError(f"Token refresh HTTP {e.code}: {body[:300]}")
+
+    access_token = result.get("access_token")
+    if not access_token:
+        raise RuntimeError(f"Token refresh failed: {result}")
+
+    print(f"  ✅ Token refreshed successfully", flush=True)
+    return access_token
 
 
 def get_or_create_folder(parent_id, folder_name, token):

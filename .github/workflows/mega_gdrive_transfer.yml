@@ -21,13 +21,8 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
-
-      - name: Restore transfer state from cache
-        uses: actions/cache@v4
         with:
-          path: mega_transfer_state.json
-          key: mega-gdrive-state-${{ github.run_id }}
-          restore-keys: mega-gdrive-state-
+          persist-credentials: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -52,3 +47,11 @@ jobs:
           GDRIVE_REMOTE: ${{ secrets.GDRIVE_REMOTE }}
           GDRIVE_FOLDER: ${{ secrets.GDRIVE_FOLDER }}
         run: python mega_to_gdrive.py
+
+      - name: Save state to repo
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add mega_transfer_state.json
+          git diff --staged --quiet || git commit -m "update state [skip ci]" && git push

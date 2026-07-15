@@ -39,6 +39,8 @@ def is_quota(text):
 
 
 def fmt_size(b):
+    if b is None:
+        return "unknown"
     if b >= 1024 * 1024:
         return f"{b / (1024 * 1024):.1f} MB"
     elif b >= 1024:
@@ -220,7 +222,7 @@ def main():
             continue
 
         # Download + Upload
-        print(f"⬇️  [{key}] downloading '{fname}' ({fmt_size(size)})... [{i}/{len(pending)}]", flush=True)
+        print(f"⬇️  [{key}] downloading '{fname or "?"}' ({fmt_size(size)})... [{i}/{len(pending)}]", flush=True)
         success = False
         for attempt in range(1, MAX_RETRIES + 1):
             try:

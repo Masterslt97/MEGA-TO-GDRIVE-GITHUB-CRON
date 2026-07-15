@@ -337,10 +337,18 @@ def main():
         if rec and rec.get("status") == "completed":
             stats["skipped"] += 1
             continue
-        # Also skip if filename exists on GDrive
-        fname = rec.get("filename") if rec else None
+        # Get filename from state or metadata
+        fname = None
+        if rec:
+            fname = rec.get("filename")
+        if not fname:
+            fname, _ = get_metadata(url)
+        # Skip if filename exists on GDrive
         if fname and fname in drive:
             stats["skipped"] += 1
+            # Also save to state for future runs
+            state[key] = {"filename": fname, "size": 0, "status": "completed"}
+            save_state(state)
             continue
         pending.append(url)
 

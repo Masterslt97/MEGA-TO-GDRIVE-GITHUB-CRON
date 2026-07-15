@@ -22,7 +22,7 @@ MAX_RETRIES = 3
 QUOTA_MARKERS = ["over quota", "bandwidth limit", "quota exceeded", "429", "eoverquota"]
 
 # Counters
-stats = {"downloaded": 0, "skipped": 0, "failed": 0, "quota_wait": 0}
+stats = {"downloaded": 0, "skipped": 0, "failed": 0}
 
 
 def link_id(url):
@@ -95,21 +95,14 @@ def upload(local):
     return os.path.basename(local)
 
 
-def print_status(total):
-    """Print live status bar with emoji counters."""
-    done = stats["downloaded"] + stats["skipped"]
+def show_progress(current, total):
+    """Show clear progress with filled bar."""
+    pct = (current / total * 100) if total > 0 else 0
     bar_len = 30
-    filled = int(bar_len * done / total) if total > 0 else 0
+    filled = int(bar_len * current / total) if total > 0 else 0
     bar = "█" * filled + "░" * (bar_len - filled)
-    pct = (done / total * 100) if total > 0 else 0
-
-    print(f"\n{'─' * 50}", flush=True)
-    print(f" 🟢 Downloaded : {stats['downloaded']}", flush=True)
-    print(f" 🟡 Skipped    : {stats['skipped']}", flush=True)
-    print(f" 🔴 Failed     : {stats['failed']}", flush=True)
-    print(f" ⏳ Quota waits: {stats['quota_wait']}", flush=True)
-    print(f" [{bar}] {pct:.1f}% ({done}/{total})", flush=True)
-    print(f"{'─' * 50}\n", flush=True)
+    print(f"  🟢 Done: {stats['downloaded']}  🟡 Skip: {stats['skipped']}  🔴 Fail: {stats['failed']}", flush=True)
+    print(f"  [{bar}] {pct:.1f}%  ({current}/{total})", flush=True)
 
 
 def main():
@@ -141,20 +134,25 @@ def main():
         pending.append(url)
 
     total = len(valid)
+    done_so_far = stats["skipped"]
+
     print(f"{'═' * 50}", flush=True)
     print(f"  🟢 MEGA -> Google Drive Transfer", flush=True)
-    print(f"  Total: {total} | Already done: {stats['skipped']} | Pending: {len(pending)}", flush=True)
+    print(f"  Total: {total} | Skipped: {stats['skipped']} | Pending: {len(pending)}", flush=True)
     print(f"{'═' * 50}\n", flush=True)
 
+    # Show initial progress if some are already done
+    if done_so_far > 0:
+        show_progress(done_so_far, total)
+        print(flush=True)
+
     if not pending:
-        completed = stats["skipped"]
         print(f"\n🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢", flush=True)
         print(f"🟢                                      🟢", flush=True)
-        print(f"🟢   HURRY 🎉 {completed} FILES TRANSFERRED     🟢", flush=True)
+        print(f"🟢   HURRY 🎉 {total} FILES TRANSFERRED     🟢", flush=True)
         print(f"🟢   TO GDRIVE! WAh 🎉                  🟢", flush=True)
         print(f"🟢                                      🟢", flush=True)
         print(f"🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢", flush=True)
-        print_status(total)
         return
 
     for i, url in enumerate(pending, 1):
@@ -166,8 +164,10 @@ def main():
             state[key] = {"filename": fname, "size": size, "status": "completed"}
             save_state(state); drive[fname] = size
             stats["skipped"] += 1
+            done_so_far += 1
             print(f"🟡 [{key}] '{fname}' — skip (already in Drive)", flush=True)
-            print_status(total)
+            show_progress(done_so_far, total)
+            print(flush=True)
             continue
 
         # Download
@@ -181,16 +181,17 @@ def main():
                 state[key] = {"filename": name, "size": sz, "status": "completed"}
                 save_state(state); drive[name] = sz
                 stats["downloaded"] += 1
+                done_so_far += 1
                 print(f"🟢 [{key}] '{name}' ({sz} bytes) — DONE", flush=True)
-                print_status(total)
+                show_progress(done_so_far, total)
+                print(flush=True)
                 success = True
                 break
             except RuntimeError as e:
                 msg = str(e)
                 if is_quota(msg):
-                    stats["quota_wait"] += 1
                     print(f"\n🔴 [{key}] QUOTA HIT — exiting. Cron resumes in 1 min.", flush=True)
-                    print_status(total)
+                    show_progress(done_so_far, total)
                     sys.exit(0)
                 print(f"🔴 [{key}] attempt {attempt}/{MAX_RETRIES}: {msg[:150]}", flush=True)
                 if attempt < MAX_RETRIES:
@@ -201,7 +202,8 @@ def main():
             state[key] = {"filename": None, "size": None, "status": "failed"}
             save_state(state)
             print(f"🔴 [{key}] FAILED after {MAX_RETRIES} attempts", flush=True)
-            print_status(total)
+            show_progress(done_so_far, total)
+            print(flush=True)
 
         if os.path.isdir(TEMP_DIR):
             shutil.rmtree(TEMP_DIR)
@@ -210,9 +212,10 @@ def main():
     completed = sum(1 for v in load_state().values() if v.get("status") == "completed")
     print(f"\n{'═' * 50}", flush=True)
     print(f"  📊 FINAL REPORT", flush=True)
-    print(f"  🟢 Completed  : {completed}/{total}", flush=True)
+    print(f"  🟢 Downloaded : {stats['downloaded']}", flush=True)
     print(f"  🟡 Skipped    : {stats['skipped']}", flush=True)
     print(f"  🔴 Failed     : {stats['failed']}", flush=True)
+    print(f"  Total done    : {completed}/{total}", flush=True)
 
     # Graph
     bar_len = 40
@@ -224,7 +227,6 @@ def main():
     print(f"  🟢=Downloaded 🟡=Skipped 🔴=Failed", flush=True)
     print(f"{'═' * 50}", flush=True)
 
-    # Celebration if all done
     if completed >= total:
         print(f"\n🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢", flush=True)
         print(f"🟢                                      🟢", flush=True)

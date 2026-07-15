@@ -222,7 +222,8 @@ def main():
             continue
 
         # Download + Upload
-        print(f"⬇️  [{key}] downloading '{fname or "?"}' ({fmt_size(size)})... [{i}/{len(pending)}]", flush=True)
+        display_name = fname or "unknown"
+        print(f"⬇️  [{key}] downloading '{display_name}' ({fmt_size(size)})... [{i}/{len(pending)}]", flush=True)
         success = False
         for attempt in range(1, MAX_RETRIES + 1):
             try:

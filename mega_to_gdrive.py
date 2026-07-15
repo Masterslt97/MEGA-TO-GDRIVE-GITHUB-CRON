@@ -129,14 +129,18 @@ def upload(local):
 
 
 def show_status(current, total):
-    pct = (current / total * 100) if total > 0 else 0
     bar_len = 30
-    filled = int(bar_len * current / total) if total > 0 else 0
-    bar = "█" * filled + "░" * (bar_len - filled)
     speed = get_speed()
+    # Speed-based bar: 0 MB/s = empty, 50+ MB/s = full
+    speed_mbps = 0
+    elapsed = time.time() - speed_start_time
+    if elapsed >= 1:
+        speed_mbps = (total_bytes_downloaded - speed_start_bytes) / elapsed / (1024 * 1024)
+    speed_pct = min(speed_mbps / 50.0, 1.0)  # 50 MB/s = 100%
+    filled = int(bar_len * speed_pct)
+    bar = "█" * filled + "░" * (bar_len - filled)
     print(f"  🟢 Done: {stats['downloaded']}  🟡 Skip: {stats['skipped']}  🔴 Fail: {stats['failed']}", flush=True)
-    print(f"  ⚡ Speed: {speed}", flush=True)
-    print(f"  [{bar}] {pct:.1f}%  ({current}/{total})", flush=True)
+    print(f"  [{bar}] ⚡ {speed}  ({current}/{total})", flush=True)
 
 
 def main():

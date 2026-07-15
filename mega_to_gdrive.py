@@ -87,8 +87,21 @@ def get_metadata(url):
 
 
 def scan_drive():
-    """List files in GDrive folder via API. Returns {filename: size}."""
-    return {}  # Disabled — use state file instead (avoids 403 rate limit)
+    """List files in GDrive folder via rclone ls. Returns {filename: size}."""
+    existing = {}
+    try:
+        r = subprocess.run(["rclone", "ls", f"{GDRIVE_REMOTE}:{GDRIVE_FOLDER}", "--max-depth", "1"],
+                            capture_output=True, text=True, timeout=120)
+        for line in r.stdout.strip().splitlines():
+            parts = line.split("\t", 1)
+            if len(parts) == 2:
+                try:
+                    existing[parts[1]] = int(parts[0])
+                except ValueError:
+                    pass
+    except Exception as e:
+        print(f"  WARN: scan_drive failed ({e})", flush=True)
+    return existing
 
 
 def download(url):
@@ -307,11 +320,14 @@ def main():
 
     os.makedirs(TEMP_DIR, exist_ok=True)
     state = load_state()
+    drive = scan_drive()
+    print(f"  📁 GDrive files found: {len(drive)}", flush=True)
 
     pending = []
     for url in valid:
         key = link_id(url)
         rec = state.get(key)
+        # Skip if completed in state file
         if rec and rec.get("status") == "completed":
             stats["skipped"] += 1
             continue

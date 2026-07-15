@@ -20,7 +20,7 @@ WORKSPACE = os.environ.get("GITHUB_WORKSPACE", os.getcwd())
 STATE_FILE = os.path.join(WORKSPACE, "mega_transfer_state.json")
 TEMP_DIR = os.path.join(WORKSPACE, "mega_temp")
 MAX_RETRIES = 3
-RUN_SECONDS = 420  # 7 minutes
+RUN_SECONDS = 999999  # continuous — no time limit
 QUOTA_MARKERS = ["over quota", "bandwidth limit", "quota exceeded", "429", "eoverquota"]
 
 stats = {"downloaded": 0, "skipped": 0, "failed": 0}
@@ -90,8 +90,14 @@ def scan_drive():
     """List files in GDrive folder via rclone ls. Returns {filename: size}."""
     existing = {}
     try:
+        # First create folder if it doesn't exist
+        subprocess.run(["rclone", "mkdir", f"{GDRIVE_REMOTE}:{GDRIVE_FOLDER}"],
+                        capture_output=True, text=True, timeout=30)
+        # List files
         r = subprocess.run(["rclone", "ls", f"{GDRIVE_REMOTE}:{GDRIVE_FOLDER}", "--max-depth", "1"],
                             capture_output=True, text=True, timeout=120)
+        if r.returncode != 0:
+            print(f"  WARN: rclone ls failed: {r.stderr[:200]}", flush=True)
         for line in r.stdout.strip().splitlines():
             parts = line.split("\t", 1)
             if len(parts) == 2:

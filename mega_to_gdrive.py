@@ -87,16 +87,40 @@ def get_metadata(url):
 
 
 def scan_drive():
+    """List files in GDrive folder via API. Returns {filename: size}."""
+    import json as _json
+    import urllib.request, urllib.parse
+
     existing = {}
-    r = subprocess.run(["rclone", "ls", f"{GDRIVE_REMOTE}:{GDRIVE_FOLDER}", "--max-depth", "1"],
-                        capture_output=True, text=True, timeout=120)
-    for line in r.stdout.strip().splitlines():
-        parts = line.split("\t", 1)
-        if len(parts) == 2:
-            try:
-                existing[parts[1]] = int(parts[0])
-            except ValueError:
-                pass
+    try:
+        token = get_gdrive_token()
+        if not token:
+            return existing
+
+        # Find folder ID
+        query = f"name='{GDRIVE_FOLDER}' and 'root' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
+        url = f"https://www.googleapis.com/drive/v3/files?q={urllib.parse.quote(query)}&fields=files(id)"
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+        resp = urllib.request.urlopen(req, timeout=30)
+        data = _json.loads(resp.read())
+
+        if not data.get("files"):
+            return existing
+
+        folder_id = data["files"][0]["id"]
+
+        # List files in folder
+        query = f"'{folder_id}' in parents and trashed=false"
+        url = f"https://www.googleapis.com/drive/v3/files?q={urllib.parse.quote(query)}&fields=files(name,size)&pageSize=1000"
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+        resp = urllib.request.urlopen(req, timeout=60)
+        data = _json.loads(resp.read())
+
+        for f in data.get("files", []):
+            existing[f["name"]] = int(f.get("size", 0))
+    except Exception as e:
+        print(f"  WARN: scan_drive failed ({e}), skip check disabled", flush=True)
+
     return existing
 
 
@@ -118,11 +142,11 @@ def download(url):
 
 def get_gdrive_token():
     """Get access token from rclone config."""
+    import json as _json
     r = subprocess.run(["rclone", "config", "show", GDRIVE_REMOTE],
                         capture_output=True, text=True, timeout=10)
     for line in r.stdout.splitlines():
         if "token" in line and "access_token" in line:
-            import json as _json
             token_str = line.split("=", 1)[1].strip()
             token_data = _json.loads(token_str)
             return token_data.get("access_token", "")
@@ -131,6 +155,7 @@ def get_gdrive_token():
 
 def get_or_create_folder(parent_id, folder_name, token):
     """Find or create a folder in Google Drive. Returns folder ID."""
+    import json as _json
     import urllib.request, urllib.parse
 
     # Search for folder
@@ -205,12 +230,6 @@ def upload(local):
         raise RuntimeError(f"Upload failed: {result}")
 
     print(f"  ✅ Uploaded to GDrive: {fname} (ID: {result['id']})", flush=True)
-    return fname
-
-    if remote_size != local_size:
-        raise RuntimeError(f"VERIFY FAILED: '{fname}' size mismatch! local={local_size} remote={remote_size}")
-
-    print(f"  ✅ Verified on GDrive: {fname} ({remote_size} bytes)", flush=True)
     return fname
 
 

@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   transfer:
@@ -61,4 +62,4 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           echo "Triggering next transfer cycle..."
-          gh workflow run "MEGA to Google Drive Transfer" --ref main || echo "Trigger failed (will be picked up by cron)"
+          gh workflow run "MEGA to Google Drive Transfer" --ref main 2>&1 && echo "Next cycle triggered!" || echo "Trigger failed (cron will retry)"

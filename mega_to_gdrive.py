@@ -21,6 +21,9 @@ TEMP_DIR = os.path.join(WORKSPACE, "mega_temp")
 MAX_RETRIES = 3
 QUOTA_MARKERS = ["over quota", "bandwidth limit", "quota exceeded", "429", "eoverquota"]
 
+# Counters
+stats = {"downloaded": 0, "skipped": 0, "failed": 0, "quota_wait": 0}
+
 
 def link_id(url):
     m = re.search(r"/file/([^#]+)", url)
@@ -92,17 +95,34 @@ def upload(local):
     return os.path.basename(local)
 
 
+def print_status(total):
+    """Print live status bar with emoji counters."""
+    done = stats["downloaded"] + stats["skipped"]
+    bar_len = 30
+    filled = int(bar_len * done / total) if total > 0 else 0
+    bar = "█" * filled + "░" * (bar_len - filled)
+    pct = (done / total * 100) if total > 0 else 0
+
+    print(f"\n{'─' * 50}", flush=True)
+    print(f" 🟢 Downloaded : {stats['downloaded']}", flush=True)
+    print(f" 🟡 Skipped    : {stats['skipped']}", flush=True)
+    print(f" 🔴 Failed     : {stats['failed']}", flush=True)
+    print(f" ⏳ Quota waits: {stats['quota_wait']}", flush=True)
+    print(f" [{bar}] {pct:.1f}% ({done}/{total})", flush=True)
+    print(f"{'─' * 50}\n", flush=True)
+
+
 def main():
     links = [l.strip() for l in MEGA_LINKS_RAW.splitlines() if l.strip()]
     valid = [l for l in links if "mega.nz/file/" in l]
     if not valid:
-        print("ERROR: No valid MEGA links."); sys.exit(1)
+        print("🔴 ERROR: No valid MEGA links."); sys.exit(1)
 
     conf_path = os.path.expanduser("~/.config/rclone/rclone.conf")
     os.makedirs(os.path.dirname(conf_path), exist_ok=True)
     if not os.path.exists(conf_path):
         if not RCLONE_CONF:
-            print("ERROR: RCLONE_CONF empty."); sys.exit(1)
+            print("🔴 ERROR: RCLONE_CONF empty."); sys.exit(1)
         open(conf_path, "w").write(RCLONE_CONF)
 
     os.makedirs(TEMP_DIR, exist_ok=True)
@@ -116,24 +136,37 @@ def main():
         if rec and rec.get("status") == "completed":
             f, s = rec.get("filename"), rec.get("size")
             if f and drive.get(f) == s:
+                stats["skipped"] += 1
                 continue
         pending.append(url)
 
-    done = len(valid) - len(pending)
-    print(f"Done: {done} | Pending: {len(pending)}", flush=True)
-    if not pending:
-        print("ALL DONE!"); return
+    total = len(valid)
+    print(f"{'═' * 50}", flush=True)
+    print(f"  🟢 MEGA -> Google Drive Transfer", flush=True)
+    print(f"  Total: {total} | Already done: {stats['skipped']} | Pending: {len(pending)}", flush=True)
+    print(f"{'═' * 50}\n", flush=True)
 
-    for url in pending:
+    if not pending:
+        print("🟢 ALL DONE!")
+        print_status(total)
+        return
+
+    for i, url in enumerate(pending, 1):
         key = link_id(url)
         fname, size = get_metadata(url)
+
+        # Already in Drive
         if fname and drive.get(fname) == size:
             state[key] = {"filename": fname, "size": size, "status": "completed"}
             save_state(state); drive[fname] = size
-            print(f"[{key}] skip (in Drive)", flush=True)
+            stats["skipped"] += 1
+            print(f"🟡 [{key}] '{fname}' — skip (already in Drive)", flush=True)
+            print_status(total)
             continue
 
-        print(f"[{key}] downloading...", flush=True)
+        # Download
+        print(f"⬇️  [{key}] downloading '{fname}' ({size} bytes)... [{i}/{len(pending)}]", flush=True)
+        success = False
         for attempt in range(1, MAX_RETRIES + 1):
             try:
                 local = download(url)
@@ -141,22 +174,49 @@ def main():
                 sz = os.path.getsize(local)
                 state[key] = {"filename": name, "size": sz, "status": "completed"}
                 save_state(state); drive[name] = sz
-                print(f"  -> '{name}' ({sz}) done", flush=True)
+                stats["downloaded"] += 1
+                print(f"🟢 [{key}] '{name}' ({sz} bytes) — DONE", flush=True)
+                print_status(total)
+                success = True
                 break
             except RuntimeError as e:
                 msg = str(e)
                 if is_quota(msg):
-                    print(f"\n!!! QUOTA HIT — exiting. Cron resumes in 1 min. !!!", flush=True)
+                    stats["quota_wait"] += 1
+                    print(f"\n🔴 [{key}] QUOTA HIT — exiting. Cron resumes in 1 min.", flush=True)
+                    print_status(total)
                     sys.exit(0)
-                print(f"  ERROR: {msg[:200]}", flush=True)
+                print(f"🔴 [{key}] attempt {attempt}/{MAX_RETRIES}: {msg[:150]}", flush=True)
                 if attempt < MAX_RETRIES:
                     time.sleep(5 * attempt)
+
+        if not success:
+            stats["failed"] += 1
+            state[key] = {"filename": None, "size": None, "status": "failed"}
+            save_state(state)
+            print(f"🔴 [{key}] FAILED after {MAX_RETRIES} attempts", flush=True)
+            print_status(total)
 
         if os.path.isdir(TEMP_DIR):
             shutil.rmtree(TEMP_DIR)
 
+    # Final report
     completed = sum(1 for v in load_state().values() if v.get("status") == "completed")
-    print(f"\n=== {completed}/{len(valid)} completed ===", flush=True)
+    print(f"\n{'═' * 50}", flush=True)
+    print(f"  📊 FINAL REPORT", flush=True)
+    print(f"  🟢 Completed  : {completed}/{total}", flush=True)
+    print(f"  🟡 Skipped    : {stats['skipped']}", flush=True)
+    print(f"  🔴 Failed     : {stats['failed']}", flush=True)
+
+    # Graph
+    bar_len = 40
+    g = int(bar_len * stats['downloaded'] / total) if total else 0
+    y = int(bar_len * stats['skipped'] / total) if total else 0
+    r = bar_len - g - y
+    graph = "🟢" * g + "🟡" * y + "🔴" * max(r, 0)
+    print(f"\n  {graph}", flush=True)
+    print(f"  🟢=Downloaded 🟡=Skipped 🔴=Failed", flush=True)
+    print(f"{'═' * 50}", flush=True)
 
 
 if __name__ == "__main__":

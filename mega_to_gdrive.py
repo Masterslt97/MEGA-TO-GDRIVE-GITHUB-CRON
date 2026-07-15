@@ -248,40 +248,54 @@ def upload(local):
     # Get/create folder
     folder_id = get_or_create_folder("root", GDRIVE_FOLDER, token)
 
-    # Upload file via resumable upload
-    metadata = _json.dumps({"name": fname, "parents": [folder_id]}).encode()
+    # Upload file via resumable upload with retry
+    for upload_attempt in range(1, 4):
+        try:
+            metadata = _json.dumps({"name": fname, "parents": [folder_id]}).encode()
 
-    # Initiate resumable upload
-    req = urllib.request.Request(
-        "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable",
-        data=metadata,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json; charset=UTF-8",
-            "X-Upload-Content-Type": "video/mp4",
-            "X-Upload-Content-Length": str(local_size)
-        }
-    )
-    resp = urllib.request.urlopen(req, timeout=30)
-    upload_url = resp.headers.get("Location")
+            # Initiate resumable upload
+            req = urllib.request.Request(
+                "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable",
+                data=metadata,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json; charset=UTF-8",
+                    "X-Upload-Content-Type": "video/mp4",
+                    "X-Upload-Content-Length": str(local_size)
+                }
+            )
+            resp = urllib.request.urlopen(req, timeout=30)
+            upload_url = resp.headers.get("Location")
 
-    if not upload_url:
-        raise RuntimeError("Failed to initiate resumable upload")
+            if not upload_url:
+                raise RuntimeError("Failed to initiate resumable upload")
 
-    # Upload content
-    with open(local, "rb") as f:
-        data = f.read()
-    req = urllib.request.Request(upload_url, data=data, method="PUT",
-                                 headers={"Content-Length": str(local_size),
-                                          "Content-Type": "video/mp4"})
-    resp = urllib.request.urlopen(req, timeout=3600)
-    result = _json.loads(resp.read())
+            # Upload content
+            with open(local, "rb") as f:
+                data = f.read()
+            req = urllib.request.Request(upload_url, data=data, method="PUT",
+                                         headers={"Content-Length": str(local_size),
+                                                  "Content-Type": "video/mp4"})
+            resp = urllib.request.urlopen(req, timeout=3600)
+            result = _json.loads(resp.read())
 
-    if not result.get("id"):
-        raise RuntimeError(f"Upload failed: {result}")
+            if not result.get("id"):
+                raise RuntimeError(f"Upload failed: {result}")
 
-    print(f"  ✅ Uploaded to GDrive: {fname} (ID: {result['id']})", flush=True)
-    return fname
+            print(f"  ✅ Uploaded to GDrive: {fname} (ID: {result['id']})", flush=True)
+            return fname
+
+        except urllib.error.HTTPError as e:
+            if e.code == 403 and upload_attempt < 3:
+                wait = 30 * upload_attempt
+                print(f"  ⚠️ 403 Forbidden (attempt {upload_attempt}/3), waiting {wait}s...", flush=True)
+                time.sleep(wait)
+                # Refresh token for next attempt
+                token = get_gdrive_token()
+                continue
+            raise RuntimeError(f"Upload HTTP {e.code}: {e.read().decode()[:200]}")
+
+    raise RuntimeError("Upload failed after 3 attempts")
 
 
 def show_status(current, total):

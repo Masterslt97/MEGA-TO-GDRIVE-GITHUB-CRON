@@ -236,7 +236,7 @@ def get_or_create_folder(parent_id, folder_name, token):
 
         except urllib.error.HTTPError as e:
             if e.code == 403 and attempt < 2:
-                wait = 30 * (attempt + 1)
+                wait = 10 * (attempt + 1)
                 print(f"  ⚠️ Folder API 403 (attempt {attempt+1}/3), waiting {wait}s...", flush=True)
                 time.sleep(wait)
                 token = get_gdrive_token()
@@ -298,10 +298,9 @@ def upload(local):
 
         except urllib.error.HTTPError as e:
             if e.code == 403 and upload_attempt < 3:
-                wait = 30 * upload_attempt
+                wait = 10 * upload_attempt
                 print(f"  ⚠️ 403 Forbidden (attempt {upload_attempt}/3), waiting {wait}s...", flush=True)
                 time.sleep(wait)
-                # Refresh token for next attempt
                 token = get_gdrive_token()
                 continue
             raise RuntimeError(f"Upload HTTP {e.code}: {e.read().decode()[:200]}")

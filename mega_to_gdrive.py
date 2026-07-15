@@ -90,6 +90,8 @@ def scan_drive():
     """List files in GDrive folder via rclone lsf. Returns {filename: 0}."""
     existing = {}
     try:
+        # Ensure token is fresh before listing
+        get_gdrive_token()
         subprocess.run(["rclone", "mkdir", f"{GDRIVE_REMOTE}:{GDRIVE_FOLDER}"],
                         capture_output=True, text=True, timeout=30)
         r = subprocess.run(
@@ -98,7 +100,7 @@ def scan_drive():
             capture_output=True, text=True, timeout=120
         )
         if r.returncode != 0:
-            print(f"  WARN: rclone lsf failed: {r.stderr[:200]}", flush=True)
+            print(f"  WARN: rclone lsf failed (rc={r.returncode}): {r.stderr[:300]}", flush=True)
         for line in r.stdout.strip().splitlines():
             fname = line.strip().rstrip("/")
             if fname:

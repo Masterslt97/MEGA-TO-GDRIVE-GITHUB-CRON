@@ -31,8 +31,8 @@ from datetime import datetime, timedelta
 
 MEGA_LINKS_RAW = os.environ.get("MEGA_LINKS", "")
 RCLONE_CONF = os.environ.get("RCLONE_CONF", "")
-GDRIVE_REMOTE = os.environ.get("GDRIVE_REMOTE", "gdrive")
-GDRIVE_FOLDER = os.environ.get("GDRIVE_FOLDER", "MEGA_Transfer")
+GDRIVE_REMOTE = os.environ.get("GDRIVE_REMOTE", "") or "gdrive"
+GDRIVE_FOLDER = os.environ.get("GDRIVE_FOLDER", "") or "MEGA_Transfer"
 
 WORKSPACE = os.environ.get("GITHUB_WORKSPACE", os.getcwd())
 STATE_FILE = os.path.join(WORKSPACE, "mega_transfer_state.json")
@@ -74,14 +74,21 @@ def save_state(state: dict):
 
 
 def get_remote_metadata(url: str):
+    """Fetch (filename, size) via megadl --info (no mega.py needed)."""
     try:
-        from mega import Mega
-        m = Mega()
-        info = m.get_public_url_info(url)
-        return info["name"], info["size"]
-    except Exception as e:
-        print(f"  WARN: could not fetch metadata ({e})")
-        return None, None
+        result = subprocess.run(
+            ["megadl", "--info", url],
+            capture_output=True, text=True, timeout=30
+        )
+        output = result.stdout.strip()
+        # megadl --info prints: "File: <name> (<size> bytes)"
+        name_match = re.search(r"File:\s+(.+?)\s+\(", output)
+        size_match = re.search(r"\((\d+)\s*bytes?\)", output)
+        if name_match and size_match:
+            return name_match.group(1), int(size_match.group(1))
+    except Exception:
+        pass
+    return None, None
 
 
 def scan_drive_folder() -> dict:

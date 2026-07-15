@@ -116,45 +116,96 @@ def download(url):
     return fpath
 
 
+def get_gdrive_token():
+    """Get access token from rclone config."""
+    r = subprocess.run(["rclone", "config", "show", GDRIVE_REMOTE],
+                        capture_output=True, text=True, timeout=10)
+    for line in r.stdout.splitlines():
+        if "token" in line and "access_token" in line:
+            import json as _json
+            token_str = line.split("=", 1)[1].strip()
+            token_data = _json.loads(token_str)
+            return token_data.get("access_token", "")
+    return ""
+
+
+def get_or_create_folder(parent_id, folder_name, token):
+    """Find or create a folder in Google Drive. Returns folder ID."""
+    import urllib.request, urllib.parse
+
+    # Search for folder
+    query = f"name='{folder_name}' and '{parent_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
+    url = f"https://www.googleapis.com/drive/v3/files?q={urllib.parse.quote(query)}&fields=files(id,name)"
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+    resp = urllib.request.urlopen(req, timeout=30)
+    data = _json.loads(resp.read())
+
+    if data.get("files"):
+        return data["files"][0]["id"]
+
+    # Create folder
+    body = _json.dumps({
+        "name": folder_name,
+        "mimeType": "application/vnd.google-apps.folder",
+        "parents": [parent_id]
+    }).encode()
+    req = urllib.request.Request("https://www.googleapis.com/drive/v3/files",
+                                 data=body,
+                                 headers={"Authorization": f"Bearer {token}",
+                                          "Content-Type": "application/json"})
+    resp = urllib.request.urlopen(req, timeout=30)
+    return _json.loads(resp.read())["id"]
+
+
 def upload(local):
+    import json as _json
+    import urllib.request
+
     fname = os.path.basename(local)
     local_size = os.path.getsize(local)
-    remote = f"{GDRIVE_REMOTE}:{GDRIVE_FOLDER}"
 
-    # Create folder if needed
-    subprocess.run(["rclone", "mkdir", remote], capture_output=True, text=True, timeout=30)
+    # Get token
+    token = get_gdrive_token()
+    if not token:
+        raise RuntimeError("Could not get Google Drive access token from rclone config")
 
-    # Debug: show rclone config
-    cfg = subprocess.run(["rclone", "config", "show", GDRIVE_REMOTE],
-                          capture_output=True, text=True, timeout=10)
-    print(f"  📋 rclone config [{GDRIVE_REMOTE}]:", flush=True)
-    for line in cfg.stdout.strip().splitlines()[:5]:
-        print(f"     {line}", flush=True)
+    # Get/create folder
+    folder_id = get_or_create_folder("root", GDRIVE_FOLDER, token)
 
-    # Upload — force overwrite
-    r = subprocess.run(["rclone", "copy", local, f"{remote}/", "--ignore-existing", "-vv"],
-                        capture_output=True, text=True, timeout=3600)
-    print(f"  📤 rclone stderr (full):", flush=True)
-    for line in r.stderr.strip().splitlines():
-        if "DEBUG" not in line and line.strip():
-            print(f"     {line}", flush=True)
-    if r.returncode != 0:
-        raise RuntimeError(f"rclone copy FAILED (exit {r.returncode})")
+    # Upload file via resumable upload
+    metadata = _json.dumps({"name": fname, "parents": [folder_id]}).encode()
 
-    # Verify file exists on remote with size check
-    check = subprocess.run(["rclone", "ls", f"{remote}/{fname}"],
-                            capture_output=True, text=True, timeout=60)
-    remote_size = 0
-    for line in check.stdout.strip().splitlines():
-        parts = line.split("\t", 1)
-        if len(parts) == 2 and parts[1] == fname:
-            try:
-                remote_size = int(parts[0])
-            except ValueError:
-                pass
+    # Initiate resumable upload
+    req = urllib.request.Request(
+        "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable",
+        data=metadata,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json; charset=UTF-8",
+            "X-Upload-Content-Type": "video/mp4",
+            "X-Upload-Content-Length": str(local_size)
+        }
+    )
+    resp = urllib.request.urlopen(req, timeout=30)
+    upload_url = resp.headers.get("Location")
 
-    if remote_size == 0:
-        raise RuntimeError(f"VERIFY FAILED: '{fname}' NOT found on remote after upload!")
+    if not upload_url:
+        raise RuntimeError("Failed to initiate resumable upload")
+
+    # Upload content
+    with open(local, "rb") as f:
+        data = f.read()
+    req = urllib.request.Request(upload_url, data=data, method="PUT",
+                                 headers={"Content-Length": str(local_size),
+                                          "Content-Type": "video/mp4"})
+    resp = urllib.request.urlopen(req, timeout=3600)
+    result = _json.loads(resp.read())
+
+    if not result.get("id"):
+        raise RuntimeError(f"Upload failed: {result}")
+
+    print(f"  ✅ Uploaded to GDrive: {fname} (ID: {result['id']})", flush=True)
+    return fname
 
     if remote_size != local_size:
         raise RuntimeError(f"VERIFY FAILED: '{fname}' size mismatch! local={local_size} remote={remote_size}")

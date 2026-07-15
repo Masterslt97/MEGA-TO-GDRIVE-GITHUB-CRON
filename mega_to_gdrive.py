@@ -209,28 +209,39 @@ def get_or_create_folder(parent_id, folder_name, token):
     import json as _json
     import urllib.request, urllib.parse
 
-    # Search for folder
-    query = f"name='{folder_name}' and '{parent_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
-    url = f"https://www.googleapis.com/drive/v3/files?q={urllib.parse.quote(query)}&fields=files(id,name)"
-    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
-    resp = urllib.request.urlopen(req, timeout=30)
-    data = _json.loads(resp.read())
+    for attempt in range(3):
+        try:
+            # Search for folder
+            query = f"name='{folder_name}' and '{parent_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
+            url = f"https://www.googleapis.com/drive/v3/files?q={urllib.parse.quote(query)}&fields=files(id,name)"
+            req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+            resp = urllib.request.urlopen(req, timeout=30)
+            data = _json.loads(resp.read())
 
-    if data.get("files"):
-        return data["files"][0]["id"]
+            if data.get("files"):
+                return data["files"][0]["id"]
 
-    # Create folder
-    body = _json.dumps({
-        "name": folder_name,
-        "mimeType": "application/vnd.google-apps.folder",
-        "parents": [parent_id]
-    }).encode()
-    req = urllib.request.Request("https://www.googleapis.com/drive/v3/files",
-                                 data=body,
-                                 headers={"Authorization": f"Bearer {token}",
-                                          "Content-Type": "application/json"})
-    resp = urllib.request.urlopen(req, timeout=30)
-    return _json.loads(resp.read())["id"]
+            # Create folder
+            body = _json.dumps({
+                "name": folder_name,
+                "mimeType": "application/vnd.google-apps.folder",
+                "parents": [parent_id]
+            }).encode()
+            req = urllib.request.Request("https://www.googleapis.com/drive/v3/files",
+                                         data=body,
+                                         headers={"Authorization": f"Bearer {token}",
+                                                  "Content-Type": "application/json"})
+            resp = urllib.request.urlopen(req, timeout=30)
+            return _json.loads(resp.read())["id"]
+
+        except urllib.error.HTTPError as e:
+            if e.code == 403 and attempt < 2:
+                wait = 30 * (attempt + 1)
+                print(f"  ⚠️ Folder API 403 (attempt {attempt+1}/3), waiting {wait}s...", flush=True)
+                time.sleep(wait)
+                token = get_gdrive_token()
+                continue
+            raise
 
 
 def upload(local):

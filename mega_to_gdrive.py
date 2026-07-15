@@ -43,6 +43,7 @@ PAUSE_SECONDS = 60     # 1 minute: cooldown pause
 MAX_RETRIES = 3
 BACKOFF_BASE_SECONDS = 5
 QUOTA_ERROR_MARKERS = ["over quota", "bandwidth limit", "quota exceeded", "429", "eoverquota"]
+QUOTA_WAIT_SECONDS = [10, 30, 60, 120, 300]  # escalation: 10s → 30s → 1m → 2m → 5m
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +241,7 @@ def main():
             print(f"[{key}] '{fname}' ({size} bytes) — downloading...", flush=True)
 
             success = False
+            quota_hit_count = 0
             for attempt in range(1, MAX_RETRIES + 1):
                 try:
                     print(f"  attempt {attempt}/{MAX_RETRIES}...", flush=True)
@@ -258,15 +260,27 @@ def main():
                 except RuntimeError as e:
                     msg = str(e)
                     if is_quota_error(msg):
-                        print(f"\n!!! MEGA QUOTA EXCEEDED at {datetime.now().strftime('%H:%M:%S')} !!!", flush=True)
-                        print("    Stopping all cycles. Will resume on next workflow run.", flush=True)
-                        global_stopped = True
-                        break
+                        quota_hit_count += 1
+                        if quota_hit_count > len(QUOTA_WAIT_SECONDS):
+                            print(f"\n!!! MEGA QUOTA EXCEEDED {quota_hit_count} times — giving up on this file. !!!", flush=True)
+                            break
+                        wait = QUOTA_WAIT_SECONDS[quota_hit_count - 1]
+                        print(f"\n!!! MEGA QUOTA HIT at {datetime.now().strftime('%H:%M:%S')} !!!", flush=True)
+                        print(f"    Waiting {wait}s for quota reset... (retry {quota_hit_count}/{len(QUOTA_WAIT_SECONDS)})", flush=True)
+                        time.sleep(wait)
+                        print(f"    Resuming at {datetime.now().strftime('%H:%M:%S')}...", flush=True)
+                        continue  # retry same file immediately
                     wait = BACKOFF_BASE_SECONDS * (2 ** (attempt - 1))
                     print(f"  ERROR: {msg[:200]}", flush=True)
                     if attempt < MAX_RETRIES:
                         print(f"  Retrying in {wait}s...", flush=True)
                         time.sleep(wait)
+
+            if quota_hit_count > len(QUOTA_WAIT_SECONDS):
+                # Quota not resetting — mark as failed, skip to next file
+                state[key] = {"filename": None, "size": None, "status": "failed"}
+                save_state(state)
+                failed_links.append(url)
 
             if global_stopped:
                 break

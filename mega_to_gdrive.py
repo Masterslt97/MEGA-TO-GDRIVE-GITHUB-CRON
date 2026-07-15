@@ -134,8 +134,10 @@ def upload(local):
     # Upload
     r = subprocess.run(["rclone", "copy", local, f"{remote}/", "-vv"],
                         capture_output=True, text=True, timeout=3600)
-    print(f"  📤 rclone stdout: {r.stdout[:300]}", flush=True)
-    print(f"  📤 rclone stderr: {r.stderr[:300]}", flush=True)
+    print(f"  📤 rclone stderr (full):", flush=True)
+    for line in r.stderr.strip().splitlines():
+        if "DEBUG" not in line and line.strip():
+            print(f"     {line}", flush=True)
     if r.returncode != 0:
         raise RuntimeError(f"rclone copy FAILED (exit {r.returncode})")
 

@@ -1,22 +1,9 @@
-# GitHub Actions workflow: MEGA → Google Drive transfer
-#
-# Cycle: 5 min download → 1 min pause → repeat until done
-#
-# Setup:
-#   1. Add repo secrets (Settings → Secrets and variables → Actions):
-#      - MEGA_LINKS      : newline-separated mega.nz/file/... URLs
-#      - RCLONE_CONF     : contents of rclone.conf
-#      - (optional) GDRIVE_REMOTE : rclone remote name (default: gdrive)
-#      - (optional) GDRIVE_FOLDER : Drive folder name (default: MEGA_Transfer)
-#
-#   2. State file is cached between runs so progress is never lost.
-
 name: MEGA to Google Drive Transfer
 
 on:
   schedule:
-    # Every 2 hours — script handles the 5min ON / 1min OFF cycle internally
-    - cron: '7 */2 * * *'
+    # Every 10 minutes — resume from where it left off
+    - cron: '*/10 * * * *'
 
   workflow_dispatch:
 
@@ -26,8 +13,7 @@ permissions:
 jobs:
   transfer:
     runs-on: ubuntu-latest
-    # 6 hours max — enough for large batches across cycles
-    timeout-minutes: 350
+    timeout-minutes: 9
 
     steps:
       - name: Checkout repo
@@ -56,7 +42,7 @@ jobs:
       - name: Install rclone
         run: curl -s https://rclone.org/install.sh | sudo bash
 
-      - name: Run transfer (5min ON / 1min OFF cycle)
+      - name: Run transfer
         env:
           MEGA_LINKS: ${{ secrets.MEGA_LINKS }}
           RCLONE_CONF: ${{ secrets.RCLONE_CONF }}

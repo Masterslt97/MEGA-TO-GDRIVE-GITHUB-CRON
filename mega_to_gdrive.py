@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
-"""MEGA to Google Drive transfer — 5 min ON, 1 min OFF cycle.
+"""MEGA to Google Drive transfer — auto-resume on quota hit.
 
-Secrets required in repo settings:
-  MEGA_LINKS       — newline-separated MEGA file links (mega.nz/file/...)
-  RCLONE_CONF      — contents of rclone.conf (with a remote named 'gdrive')
+Secrets required:
+  MEGA_LINKS       — newline-separated MEGA file links
+  RCLONE_CONF      — contents of rclone.conf
   GDRIVE_REMOTE    — (optional) rclone remote name, default 'gdrive'
-  GDRIVE_FOLDER    — (optional) Drive destination folder, default 'MEGA_Transfer'
+  GDRIVE_FOLDER    — (optional) Drive folder, default 'MEGA_Transfer'
 
-Behaviour:
-  The script runs in a continuous loop:
-    1. Download files for 5 minutes
-    2. Pause for 1 minute (MEGA quota cooldown)
-    3. Repeat until all files are done
-  State is persisted in mega_transfer_state.json so progress is never lost.
+Logic:
+  Download files one by one.
+  Quota hit → exit immediately.
+  Cron triggers again → script resumes from state file.
 """
 
 import json
@@ -23,7 +21,6 @@ import subprocess
 import sys
 import time
 import hashlib
-from datetime import datetime, timedelta
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -37,13 +34,9 @@ GDRIVE_FOLDER = os.environ.get("GDRIVE_FOLDER", "") or "MEGA_Transfer"
 WORKSPACE = os.environ.get("GITHUB_WORKSPACE", os.getcwd())
 STATE_FILE = os.path.join(WORKSPACE, "mega_transfer_state.json")
 TEMP_DIR = os.path.join(WORKSPACE, "mega_temp")
-
-ACTIVE_SECONDS = 300   # 5 minutes: download window
-PAUSE_SECONDS = 60     # 1 minute: cooldown pause
 MAX_RETRIES = 3
 BACKOFF_BASE_SECONDS = 5
 QUOTA_ERROR_MARKERS = ["over quota", "bandwidth limit", "quota exceeded", "429", "eoverquota"]
-QUOTA_WAIT_SECONDS = [10, 30, 60, 120, 300]  # escalation: 10s → 30s → 1m → 2m → 5m
 
 
 # ---------------------------------------------------------------------------
@@ -75,14 +68,12 @@ def save_state(state: dict):
 
 
 def get_remote_metadata(url: str):
-    """Fetch (filename, size) via megadl --info (no mega.py needed)."""
     try:
         result = subprocess.run(
             ["megadl", "--info", url],
             capture_output=True, text=True, timeout=30
         )
         output = result.stdout.strip()
-        # megadl --info prints: "File: <name> (<size> bytes)"
         name_match = re.search(r"File:\s+(.+?)\s+\(", output)
         size_match = re.search(r"\((\d+)\s*bytes?\)", output)
         if name_match and size_match:
@@ -140,11 +131,6 @@ def upload_to_drive(local_path: str) -> str:
     return os.path.basename(local_path)
 
 
-def fmt_elapsed(seconds: float) -> str:
-    m, s = divmod(int(seconds), 60)
-    return f"{m}m {s}s"
-
-
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -154,14 +140,12 @@ def main():
     valid_links = [l for l in links if "mega.nz/file/" in l]
 
     if not valid_links:
-        print("ERROR: No valid MEGA links found. Set MEGA_LINKS secret.")
+        print("ERROR: No valid MEGA links found.")
         sys.exit(1)
 
     print(f"=== MEGA -> Google Drive Transfer ===", flush=True)
     print(f"Links queued: {len(valid_links)}", flush=True)
-    print(f"Cycle: {ACTIVE_SECONDS//60} min ON / {PAUSE_SECONDS//60} min OFF", flush=True)
     print(f"Drive remote: {GDRIVE_REMOTE}:{GDRIVE_FOLDER}", flush=True)
-    print(flush=True)
 
     # --- Setup rclone conf ---
     conf_dir = os.path.expanduser("~/.config/rclone")
@@ -182,7 +166,7 @@ def main():
     drive_files = scan_drive_folder()
     print(f"state.json: {len(state)} tracked, Drive: {len(drive_files)} files", flush=True)
 
-    # --- Pre-filter: skip already done links ---
+    # --- Find pending links ---
     pending_links = []
     already_done = 0
     for url in valid_links:
@@ -198,131 +182,74 @@ def main():
     print(f"Already done: {already_done}, Pending: {len(pending_links)}", flush=True)
 
     if not pending_links:
-        print("All files already transferred! Nothing to do.")
+        print("ALL FILES DONE! Nothing to do.")
         return
 
-    # --- Continuous cycle loop ---
-    cycle = 0
-    global_stopped = False
+    # --- Download loop ---
+    quota_hit = False
+    downloaded_this_run = 0
 
-    while pending_links and not global_stopped:
-        cycle += 1
-        cycle_start = datetime.now()
-        cycle_end = cycle_start + timedelta(seconds=ACTIVE_SECONDS)
-        print(f"\n{'='*50}", flush=True)
-        print(f"CYCLE {cycle} — active window: {ACTIVE_SECONDS//60} min", flush=True)
-        print(f"  Started: {cycle_start.strftime('%H:%M:%S')}", flush=True)
-        print(f"  Will pause at: {cycle_end.strftime('%H:%M:%S')}", flush=True)
-        print(f"  Remaining: {len(pending_links)} files", flush=True)
-        print(f"{'='*50}\n", flush=True)
+    for url in pending_links:
+        key = link_id(url)
 
-        links_this_cycle = 0
+        # Metadata check
+        fname, size = get_remote_metadata(url)
+        if fname and drive_files.get(fname) == size:
+            print(f"[{key}] '{fname}' — already in Drive, skipping.", flush=True)
+            state[key] = {"filename": fname, "size": size, "status": "completed"}
+            save_state(state)
+            drive_files[fname] = size
+            downloaded_this_run += 1
+            continue
 
-        for url in list(pending_links):
-            # Check time
-            now = datetime.now()
-            if now >= cycle_end:
-                print(f"\n--- 5 min window over, pausing 1 min... ({now.strftime('%H:%M:%S')}) ---", flush=True)
-                break
+        print(f"[{key}] '{fname}' ({size} bytes) — downloading...", flush=True)
 
-            key = link_id(url)
+        success = False
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                print(f"  attempt {attempt}/{MAX_RETRIES}...", flush=True)
+                local_path = download_one(url)
+                dfname = upload_to_drive(local_path)
+                dsize = os.path.getsize(local_path)
+                print(f"  -> uploaded '{dfname}' ({dsize} bytes)", flush=True)
 
-            # Metadata check
-            fname, size = get_remote_metadata(url)
-            if fname and drive_files.get(fname) == size:
-                print(f"[{key}] '{fname}' — already in Drive, skipping.", flush=True)
-                state[key] = {"filename": fname, "size": size, "status": "completed"}
+                state[key] = {"filename": dfname, "size": dsize, "status": "completed"}
                 save_state(state)
-                drive_files[fname] = size
-                pending_links.remove(url)
-                links_this_cycle += 1
-                continue
-
-            print(f"[{key}] '{fname}' ({size} bytes) — downloading...", flush=True)
-
-            success = False
-            quota_hit_count = 0
-            for attempt in range(1, MAX_RETRIES + 1):
-                try:
-                    print(f"  attempt {attempt}/{MAX_RETRIES}...", flush=True)
-                    local_path = download_one(url)
-                    dfname = upload_to_drive(local_path)
-                    dsize = os.path.getsize(local_path)
-                    print(f"  -> uploaded '{dfname}' ({dsize} bytes)", flush=True)
-
-                    state[key] = {"filename": dfname, "size": dsize, "status": "completed"}
-                    save_state(state)
-                    drive_files[dfname] = dsize
-                    success = True
-                    links_this_cycle += 1
-                    pending_links.remove(url)
+                drive_files[dfname] = dsize
+                success = True
+                downloaded_this_run += 1
+                break
+            except RuntimeError as e:
+                msg = str(e)
+                if is_quota_error(msg):
+                    print(f"\n!!! QUOTA HIT at {__import__('datetime').datetime.now().strftime('%H:%M:%S')} !!!", flush=True)
+                    print("    Exiting. Cron will restart in 10 min.", flush=True)
+                    quota_hit = True
                     break
-                except RuntimeError as e:
-                    msg = str(e)
-                    if is_quota_error(msg):
-                        quota_hit_count += 1
-                        if quota_hit_count > len(QUOTA_WAIT_SECONDS):
-                            print(f"\n!!! MEGA QUOTA EXCEEDED {quota_hit_count} times — giving up on this file. !!!", flush=True)
-                            break
-                        wait = QUOTA_WAIT_SECONDS[quota_hit_count - 1]
-                        print(f"\n!!! MEGA QUOTA HIT at {datetime.now().strftime('%H:%M:%S')} !!!", flush=True)
-                        print(f"    Waiting {wait}s for quota reset... (retry {quota_hit_count}/{len(QUOTA_WAIT_SECONDS)})", flush=True)
-                        time.sleep(wait)
-                        print(f"    Resuming at {datetime.now().strftime('%H:%M:%S')}...", flush=True)
-                        continue  # retry same file immediately
-                    wait = BACKOFF_BASE_SECONDS * (2 ** (attempt - 1))
-                    print(f"  ERROR: {msg[:200]}", flush=True)
-                    if attempt < MAX_RETRIES:
-                        print(f"  Retrying in {wait}s...", flush=True)
-                        time.sleep(wait)
+                wait = BACKOFF_BASE_SECONDS * (2 ** (attempt - 1))
+                print(f"  ERROR: {msg[:200]}", flush=True)
+                if attempt < MAX_RETRIES:
+                    print(f"  Retrying in {wait}s...", flush=True)
+                    time.sleep(wait)
 
-            if quota_hit_count > len(QUOTA_WAIT_SECONDS):
-                # Quota not resetting — mark as failed, skip to next file
-                state[key] = {"filename": None, "size": None, "status": "failed"}
-                save_state(state)
-                failed_links.append(url)
-
-            if global_stopped:
-                break
-
-            clear_temp_dir()
-
-        # --- Cycle done ---
-        elapsed = (datetime.now() - cycle_start).total_seconds()
-        print(f"\nCycle {cycle} finished: {links_this_cycle} files in {fmt_elapsed(elapsed)}", flush=True)
-        save_state(state)
-
-        if global_stopped:
+        if quota_hit:
             break
 
-        if not pending_links:
-            print("\n*** ALL FILES TRANSFERRED! ***", flush=True)
-            break
+        clear_temp_dir()
 
-        # --- 1 minute pause ---
-        print(f"\n--- PAUSING for {PAUSE_SECONDS//60} min at {datetime.now().strftime('%H:%M:%S')} ---", flush=True)
-        print(f"    {len(pending_links)} files remaining after pause.", flush=True)
-        time.sleep(PAUSE_SECONDS)
-        print(f"--- RESUMING at {datetime.now().strftime('%H:%M:%S')} ---\n", flush=True)
-
-    # --- Final report ---
+    # --- Report ---
     completed = [k for k, v in state.items() if v.get("status") == "completed"]
-    failed = [k for k, v in state.items() if v.get("status") == "failed"]
+    remaining = len(valid_links) - len(completed)
 
-    print(f"\n{'='*50}", flush=True)
-    print(f"FINAL REPORT", flush=True)
-    print(f"  Total links : {len(valid_links)}", flush=True)
-    print(f"  Completed   : {len(completed)}", flush=True)
-    print(f"  Failed      : {len(failed)}", flush=True)
-    print(f"  Pending     : {len(pending_links)}", flush=True)
-    if global_stopped:
-        print(f"  Reason      : Quota exceeded — will resume on next trigger.", flush=True)
-    elif not pending_links:
-        print(f"  Status      : ALL DONE!", flush=True)
-    print(f"{'='*50}", flush=True)
-
-    if global_stopped or failed:
-        sys.exit(1)
+    print(f"\n=== Run Report ===", flush=True)
+    print(f"  Downloaded this run : {downloaded_this_run}", flush=True)
+    print(f"  Total completed     : {len(completed)}", flush=True)
+    print(f"  Remaining           : {remaining}", flush=True)
+    if quota_hit:
+        print(f"  Status: QUOTA HIT — cron will resume in ~10 min", flush=True)
+    elif remaining == 0:
+        print(f"  Status: ALL DONE!", flush=True)
+    print(f"===================", flush=True)
 
 
 if __name__ == "__main__":

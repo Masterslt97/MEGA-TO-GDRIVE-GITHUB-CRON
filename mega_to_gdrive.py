@@ -87,24 +87,22 @@ def get_metadata(url):
 
 
 def scan_drive():
-    """List files in GDrive folder via rclone ls. Returns {filename: size}."""
+    """List files in GDrive folder via rclone lsf. Returns {filename: 0}."""
     existing = {}
     try:
-        # First create folder if it doesn't exist
         subprocess.run(["rclone", "mkdir", f"{GDRIVE_REMOTE}:{GDRIVE_FOLDER}"],
                         capture_output=True, text=True, timeout=30)
-        # List files
-        r = subprocess.run(["rclone", "ls", f"{GDRIVE_REMOTE}:{GDRIVE_FOLDER}", "--max-depth", "1"],
-                            capture_output=True, text=True, timeout=120)
+        r = subprocess.run(
+            ["rclone", "lsf", f"{GDRIVE_REMOTE}:{GDRIVE_FOLDER}",
+             "--max-depth", "1"],
+            capture_output=True, text=True, timeout=120
+        )
         if r.returncode != 0:
-            print(f"  WARN: rclone ls failed: {r.stderr[:200]}", flush=True)
+            print(f"  WARN: rclone lsf failed: {r.stderr[:200]}", flush=True)
         for line in r.stdout.strip().splitlines():
-            parts = line.split("\t", 1)
-            if len(parts) == 2:
-                try:
-                    existing[parts[1]] = int(parts[0])
-                except ValueError:
-                    pass
+            fname = line.strip().rstrip("/")
+            if fname:
+                existing[fname] = 0
     except Exception as e:
         print(f"  WARN: scan_drive failed ({e})", flush=True)
     return existing
@@ -335,6 +333,11 @@ def main():
         rec = state.get(key)
         # Skip if completed in state file
         if rec and rec.get("status") == "completed":
+            stats["skipped"] += 1
+            continue
+        # Also skip if filename exists on GDrive
+        fname = rec.get("filename") if rec else None
+        if fname and fname in drive:
             stats["skipped"] += 1
             continue
         pending.append(url)

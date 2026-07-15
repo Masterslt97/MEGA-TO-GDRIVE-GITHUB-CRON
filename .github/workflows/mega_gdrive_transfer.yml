@@ -2,8 +2,8 @@ name: MEGA to Google Drive Transfer
 
 on:
   schedule:
-    # Every 10 minutes — resume from where it left off
-    - cron: '*/10 * * * *'
+    # Every minute — script handles 10s quota retry internally
+    - cron: '* * * * *'
 
   workflow_dispatch:
 

@@ -88,40 +88,7 @@ def get_metadata(url):
 
 def scan_drive():
     """List files in GDrive folder via API. Returns {filename: size}."""
-    import json as _json
-    import urllib.request, urllib.parse
-
-    existing = {}
-    try:
-        token = get_gdrive_token()
-        if not token:
-            return existing
-
-        # Find folder ID
-        query = f"name='{GDRIVE_FOLDER}' and 'root' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
-        url = f"https://www.googleapis.com/drive/v3/files?q={urllib.parse.quote(query)}&fields=files(id)"
-        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
-        resp = urllib.request.urlopen(req, timeout=30)
-        data = _json.loads(resp.read())
-
-        if not data.get("files"):
-            return existing
-
-        folder_id = data["files"][0]["id"]
-
-        # List files in folder
-        query = f"'{folder_id}' in parents and trashed=false"
-        url = f"https://www.googleapis.com/drive/v3/files?q={urllib.parse.quote(query)}&fields=files(name,size)&pageSize=1000"
-        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
-        resp = urllib.request.urlopen(req, timeout=60)
-        data = _json.loads(resp.read())
-
-        for f in data.get("files", []):
-            existing[f["name"]] = int(f.get("size", 0))
-    except Exception as e:
-        print(f"  WARN: scan_drive failed ({e}), skip check disabled", flush=True)
-
-    return existing
+    return {}  # Disabled — use state file instead (avoids 403 rate limit)
 
 
 def download(url):
@@ -340,17 +307,14 @@ def main():
 
     os.makedirs(TEMP_DIR, exist_ok=True)
     state = load_state()
-    drive = scan_drive()
 
     pending = []
     for url in valid:
         key = link_id(url)
         rec = state.get(key)
         if rec and rec.get("status") == "completed":
-            f, s = rec.get("filename"), rec.get("size")
-            if f and drive.get(f) == s:
-                stats["skipped"] += 1
-                continue
+            stats["skipped"] += 1
+            continue
         pending.append(url)
 
     total = len(valid)

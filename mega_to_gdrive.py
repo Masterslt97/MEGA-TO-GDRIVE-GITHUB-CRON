@@ -355,7 +355,7 @@ def main():
         # Skip if already in Drive
         if fname and drive.get(fname) == size:
             state[key] = {"filename": fname, "size": size, "status": "completed"}
-            save_state(state); drive[fname] = size
+            save_state(state)
             stats["skipped"] += 1
             done_so_far += 1
             print(f"🟡 [{key}] '{fname}' — skip", flush=True)
@@ -375,7 +375,7 @@ def main():
                 print(f"  📤 Uploading to GDrive...", flush=True)
                 name = upload(local)
                 state[key] = {"filename": name, "size": sz, "status": "completed"}
-                save_state(state); drive[name] = sz
+                save_state(state)
                 stats["downloaded"] += 1
                 done_so_far += 1
                 print(f"  ✅ [{key}] '{name}' ({fmt_size(sz)}) — DONE", flush=True)

@@ -131,8 +131,8 @@ def upload(local):
     for line in cfg.stdout.strip().splitlines()[:5]:
         print(f"     {line}", flush=True)
 
-    # Upload
-    r = subprocess.run(["rclone", "copy", local, f"{remote}/", "-vv"],
+    # Upload — force overwrite
+    r = subprocess.run(["rclone", "copy", local, f"{remote}/", "--ignore-existing", "-vv"],
                         capture_output=True, text=True, timeout=3600)
     print(f"  📤 rclone stderr (full):", flush=True)
     for line in r.stderr.strip().splitlines():

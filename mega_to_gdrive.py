@@ -237,7 +237,12 @@ def main():
             except RuntimeError as e:
                 msg = str(e)
                 if is_quota(msg):
-                    print(f"\n🔴 [{key}] QUOTA HIT — exiting. Resumes in 1 min.", flush=True)
+                    print(f"\n🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴", flush=True)
+                    print(f"🔴                                      🔴", flush=True)
+                    print(f"🔴   QUOTA OVER 🚫 BANDWIDTH LIMIT      🔴", flush=True)
+                    print(f"🔴   Wait 1 min — Cron auto-resumes!    🔴", flush=True)
+                    print(f"🔴                                      🔴", flush=True)
+                    print(f"🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴", flush=True)
                     show_status(done_so_far, total)
                     sys.exit(0)
                 print(f"  🔴 Attempt {attempt}/{MAX_RETRIES}: {msg[:150]}", flush=True)

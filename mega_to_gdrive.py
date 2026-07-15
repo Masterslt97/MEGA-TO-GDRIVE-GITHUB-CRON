@@ -147,7 +147,13 @@ def main():
     print(f"{'═' * 50}\n", flush=True)
 
     if not pending:
-        print("🟢 ALL DONE!")
+        completed = stats["skipped"]
+        print(f"\n🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢", flush=True)
+        print(f"🟢                                      🟢", flush=True)
+        print(f"🟢   HURRY 🎉 {completed} FILES TRANSFERRED     🟢", flush=True)
+        print(f"🟢   TO GDRIVE! WAh 🎉                  🟢", flush=True)
+        print(f"🟢                                      🟢", flush=True)
+        print(f"🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢", flush=True)
         print_status(total)
         return
 
@@ -217,6 +223,15 @@ def main():
     print(f"\n  {graph}", flush=True)
     print(f"  🟢=Downloaded 🟡=Skipped 🔴=Failed", flush=True)
     print(f"{'═' * 50}", flush=True)
+
+    # Celebration if all done
+    if completed >= total:
+        print(f"\n🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢", flush=True)
+        print(f"🟢                                      🟢", flush=True)
+        print(f"🟢   HURRY 🎉 {total} FILES TRANSFERRED     🟢", flush=True)
+        print(f"🟢   TO GDRIVE! WAh 🎉                  🟢", flush=True)
+        print(f"🟢                                      🟢", flush=True)
+        print(f"🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢", flush=True)
 
 
 if __name__ == "__main__":

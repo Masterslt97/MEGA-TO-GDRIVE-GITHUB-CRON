@@ -118,10 +118,37 @@ def download(url):
 
 def upload(local):
     fname = os.path.basename(local)
-    r = subprocess.run(["rclone", "copy", local, f"{GDRIVE_REMOTE}:{GDRIVE_FOLDER}/"],
+    local_size = os.path.getsize(local)
+    remote = f"{GDRIVE_REMOTE}:{GDRIVE_FOLDER}"
+
+    # Create folder if needed
+    subprocess.run(["rclone", "mkdir", remote], capture_output=True, text=True, timeout=30)
+
+    # Upload with verbose
+    r = subprocess.run(["rclone", "copy", local, f"{remote}/", "-v"],
                         capture_output=True, text=True, timeout=3600)
     if r.returncode != 0:
-        raise RuntimeError(f"rclone failed: {(r.stdout + r.stderr)[:300]}")
+        raise RuntimeError(f"rclone copy FAILED: {(r.stdout + r.stderr)[:500]}")
+
+    # Verify file exists on remote with size check
+    check = subprocess.run(["rclone", "ls", f"{remote}/{fname}"],
+                            capture_output=True, text=True, timeout=60)
+    remote_size = 0
+    for line in check.stdout.strip().splitlines():
+        parts = line.split("\t", 1)
+        if len(parts) == 2 and parts[1] == fname:
+            try:
+                remote_size = int(parts[0])
+            except ValueError:
+                pass
+
+    if remote_size == 0:
+        raise RuntimeError(f"VERIFY FAILED: '{fname}' NOT found on remote after upload!")
+
+    if remote_size != local_size:
+        raise RuntimeError(f"VERIFY FAILED: '{fname}' size mismatch! local={local_size} remote={remote_size}")
+
+    print(f"  ✅ Verified on GDrive: {fname} ({remote_size} bytes)", flush=True)
     return fname
 
 

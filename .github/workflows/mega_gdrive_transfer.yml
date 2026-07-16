@@ -3,6 +3,10 @@ name: MEGA to Google Drive Transfer
 on:
   workflow_dispatch:
 
+concurrency:
+  group: mega-transfer-single
+  cancel-in-progress: false
+
 permissions:
   contents: write
   actions: write
@@ -64,5 +68,25 @@ jobs:
           git stash pop || true
           git add completed_links.json
           git diff --staged --quiet || git commit -m "update state [skip ci]" && git push
+
+      - name: Auto-trigger next if files remain
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python -c "
+import json
+d = json.load(open('completed_links.json'))
+rem = sum(f['total']-f['done'] for f in d.get('folders',{}).values() if f.get('status')!='completed')
+print(f'Remaining: {rem}')
+if rem > 0:
+    import subprocess, sys
+    r = subprocess.run(['gh','workflow','run','MEGA to Google Drive Transfer','--ref','main'], capture_output=True, text=True)
+    if r.returncode == 0:
+        print('Next cycle triggered')
+    else:
+        print(f'Trigger failed: {r.stderr.strip()}')
+    sys.exit(0 if r.returncode == 0 else 1)
+"
 
 

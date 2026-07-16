@@ -46,6 +46,34 @@ def log(msg):
     print(msg, flush=True)
 
 
+def git_push(quiet=False):
+    try:
+        subprocess.run(["git", "config", "user.name", "github-actions[bot]"], capture_output=True, timeout=5)
+        subprocess.run(["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"], capture_output=True, timeout=5)
+        subprocess.run(["git", "add", "completed_links.json"], check=True, capture_output=True, timeout=15)
+        r = subprocess.run(
+            ["git", "commit", "-m", "update state [skip ci]"],
+            capture_output=True, text=True, timeout=15
+        )
+        if r.returncode != 0 and "nothing to commit" not in r.stderr and "nothing to commit" not in r.stdout:
+            if not quiet:
+                log(f"  [git] commit skipped: {r.stderr.strip() or r.stdout.strip()}")
+            return
+        subprocess.run(
+            ["git", "pull", "--rebase", "origin", "main"],
+            capture_output=True, timeout=30
+        )
+        subprocess.run(["git", "push"], capture_output=True, timeout=30)
+        if not quiet:
+            log("  [git] state pushed to repo")
+    except subprocess.TimeoutExpired:
+        if not quiet:
+            log("  [git] timeout pushing state")
+    except Exception as e:
+        if not quiet:
+            log(f"  [git] push error: {e}")
+
+
 def timestamp():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -375,7 +403,8 @@ def main():
         state["completed"] = completed
         state["folders"] = folders
         save_completed(state)
-        log(f"  Artifact saved: {folders[active_folder]['done']}/{folders[active_folder]['total']} done")
+        git_push(quiet=True)
+        log(f"  Artifact+Git saved: {folders[active_folder]['done']}/{folders[active_folder]['total']} done")
 
         # Cleanup
         shutil.rmtree(TEMP_DIR, ignore_errors=True)
@@ -413,6 +442,7 @@ def main():
     state["completed"] = completed
     state["oversized"] = oversized
     save_completed(state)
+    git_push()
 
     # Summary
     log(f"\n{'=' * 55}")

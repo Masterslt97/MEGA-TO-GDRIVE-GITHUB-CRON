@@ -458,6 +458,46 @@ https://mega.nz/file/def456#key2
 
 ---
 
+## Resetting Completion List (State Reset)
+
+### Kab reset karna chahiye?
+- Pehli baar setup kar rahe hain
+- GDrive se saari files delete karke fresh start karna chahte hain
+- Koi corruption hui hai state file mein (e.g., merge conflict markers)
+
+### Reset kaise karein?
+
+**Method 1: GitHub API se (recommended)**
+```
+gh api -X PUT repos/shivamjislt97/MEGA-TO-GDRIVE-GITHUB-CRON/contents/completed_links.json \
+  -f message="reset state [skip ci]" \
+  -f content="eyJmb2xkZXJzIjoge319" \
+  -f sha=COMMIT_SHA \
+  -f branch=main
+```
+(COMMIT_SHA = current file SHA, `gh api repos/.../contents/completed_links.json --jq '.sha'` se milega)
+
+**Method 2: Direct push (local repo)**
+```bash
+python -c "import json; json.dump({'folders':{}}, open('completed_links.json','w'), indent=2)"
+git add completed_links.json
+git commit -m "reset state [skip ci]"
+git push
+```
+
+**Method 3: GitHub Web UI**
+1. `completed_links.json` file open karo
+2. ✏️ Edit button click karo
+3. Content replace karo with: `{"folders": {}}`
+4. "Commit changes" click karo (auto-commit to main)
+
+### Reset ke baad kya hota hai?
+- Saare folders wapas `pending` state mein aa jayenge
+- `current_folder` null ho jayega
+- Agli run first folder se start hogi, saari files from scratch process hogi
+
+---
+
 ## How Quota Is Managed
 
 ### The Problem
@@ -652,6 +692,7 @@ clone config show gdrive |
 | Folder not appearing in GDrive | Remote name wrong | Default remote is gdrive, must match rclone config |
 | Workflow keeps running after all done | No "all done" detection | Script outputs ::notice:: — check logs for "ALL DONE" |
 | Files >5GB never get processed | MEGA quota limit per run | Download manually and upload via rclone |
+| State file corrupted/merge conflict | Git pull --rebase conflict in completed_links.json | Reset state using methods above |
 
 ---
 

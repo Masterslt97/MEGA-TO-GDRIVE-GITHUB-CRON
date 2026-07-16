@@ -409,8 +409,44 @@ Your MEGA file links in JSON format — one line (minified):
 **Rules:**
 - **Key** = GDrive folder name (automatically created)
 - **Value** = Array of MEGA file links (not folder links)
-- Multiple folders supported
-- Empty arrays allowed: "FolderName": []
+- Multiple folders supported (separate with comma)
+- Empty arrays allowed: `"FolderName": []`
+
+**How to create MEGA_LINKS from a text file:**
+
+Agar aapke paas ek `.txt` file hai jisme har line mein ek MEGA link hai:
+
+```
+https://mega.nz/file/abc#key1
+https://mega.nz/file/def#key2
+https://mega.nz/file/ghi#key3
+```
+
+Toh JSON convert karne ke liye ye Python command use karo:
+
+```bash
+python -c "import json; urls=[l.strip() for l in open('links.txt') if l.strip()]; print(json.dumps({'FolderName': urls}, separators=(',',':')))"
+```
+
+Output copy karo aur GitHub Secret mein paste karo. Example output:
+
+```
+{"FolderName":["https://mega.nz/file/abc#key1","https://mega.nz/file/def#key2","https://mega.nz/file/ghi#key3"]}
+```
+
+**Multiple folders example:**
+
+Agar do folder ek saath chahiye:
+
+```
+python -c "import json; s=open('Shorts.txt').readlines()+open('Movies.txt').readlines(); print('Too complex — manually merge')"
+```
+
+Manually merge karo:
+
+```json
+{"Shorts":["https://mega.nz/file/abc#key1"],"Beautiful Girls":["https://mega.nz/file/def#key2","https://mega.nz/file/ghi#key3"]}
+```
 
 #### Secret 2: RCLONE_CONF
 

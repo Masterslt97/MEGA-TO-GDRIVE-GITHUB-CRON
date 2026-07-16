@@ -41,13 +41,15 @@ Instead of scanning GDrive every run (slow, 10-30 sec), we use **GitHub Artifact
 | Change | Old Way | New Way |
 |--------|---------|---------|
 | **Metadata fetch** | `megadl --info` (CLI flag unsupported in older versions) | `mega.py` Python library (`get_public_url_info()`) |
-| **Download** | `megadl --progress` (CLI flag unsupported) | `mega.py` Python library (`download_url()`) |
+| **Download** | `mega.py` (`download_url()`) — hangs indefinitely on broken links | `megadl --path` only — with 600s timeout, no progress spam |
 | **Upload verify** | `rclone lsjson` check after upload (could timeout/crash) | No verify — upload directly marks complete. Upload always succeeds or raises error |
 | **State save** | End of workflow via artifact + git | **Per-file git push** — har file ke baad immediate commit+push to repo |
 | **Auto-trigger** | Always runs (even on cancellation) | Only on `success()` or `failure()`, not on cancellation |
 | **Inline Python** | Inline `python -c "..."` in YAML (broke YAML parsing) | Standalone `auto_trigger.py` file |
 | **Python compat** | — | `asyncio.coroutine` fallback for Python 3.12+ |
 | **Schedule** | Cron every 5 minutes | No cron — only manual + auto-trigger when files remain |
+| **Source of links** | Uses `MEGA_LINKS_merged.json` from repo file | Reads `MEGA_LINKS` **GitHub Secret** — updating repo file has no effect |
+| **Download logging** | Raw megadl progress lines printed | Clean `DOWNLOADING...` / `Downloaded: X MB in Ys` — no megadl spam |
 
 ---
 
@@ -170,15 +172,16 @@ When Phase 4 starts, each file goes through these steps:
     └─────────────────────────────────────────────────────┘
                               │ (only if quota OK)
                               ▼
-    ┌─────────────────────────────────────────────────────┐
-    │  STEP D: DOWNLOAD FROM MEGA (via mega.py)           │
-    │  ┌───────────────────────────────────────────────┐  │
-    │  │ Mega().download_url(url, dest_path=TEMP_DIR)  │  │
-    │  │ Fallback: megadl --path TEMP_DIR <url>        │  │
-    │  │ File saved: TEMP_DIR/<filename>               │  │
-    │  │ If quota exceeded mid-download → graceful exit│  │
-    │  └───────────────────────────────────────────────┘  │
-    └─────────────────────────┬───────────────────────────┘
+     ┌─────────────────────────────────────────────────────┐
+     │  STEP D: DOWNLOAD FROM MEGA (via megadl only)       │
+     │  ┌───────────────────────────────────────────────┐  │
+     │  │ megadl --path TEMP_DIR <url>                  │  │
+     │  │ (mega.py download_url removed — it hangs      │  │
+     │  │  on broken links indefinitely)                │  │
+     │  │ Timeout: 600s (megadl hangs, runner moves on) │  │
+     │  │ File saved: TEMP_DIR/<filename>               │  │
+     │  └───────────────────────────────────────────────┘  │
+     └─────────────────────────┬───────────────────────────┘
                               │
                               ▼
     ┌─────────────────────────────────────────────────────┐
@@ -321,18 +324,20 @@ Next Run → git pull → File 1,2 already in state → Skip!
 | Feature | Description |
 |---------|-------------|
 | **Multi-folder** | JSON-based folder mapping. Each key = GDrive folder name. Auto-created via rclone mkdir. |
-| **mega.py library** | Metadata fetch and download via Python library (more reliable than megadl CLI). |
+| **megadl-only download** | `mega.py` `download_url()` removed (hangs on broken links). Uses `megadl --path` with 600s timeout. |
+| **mega.py metadata** | Only used for `get_public_url_info()` to fetch file size before download (quota check). |
 | **asyncio.coroutine fallback** | Python 3.12+ compatibility fix for mega.py dependency. |
 | **Per-file git push** | Har file upload ke baad turant `git commit + push`. Workflow crash ho tab bhi state safe. |
 | **Smart quota** | Har file se pehle metadata fetch → size check. Agar quota exceed hone wala ho → skip gracefully. |
 | **Oversized handling** | Files >5GB separated in oversized list. Manual handling ke liye alag category. |
 | **Folder auto-advance** | Ek folder complete → next pending folder automatically active. |
-| **Real-time logs** | Download/upload progress with MB, timing in GitHub Actions logs. |
+| **Clean logs** | Only `DOWNLOADING...` / `Downloaded: X MB in Ys` — no megadl progress spam. |
 | **Git backup** | Dual protection: Artifact + per-file git push. Har file ka record safe. |
 | **Auto-trigger** | Files baki hain? → Next cycle automatically trigger via gh workflow run (skip on cancellation). |
 | **Auto-stop** | Saare folders complete → no more cycles triggered. |
 | **Multi-file merge** | Multiple `.txt` files ko merge karke ek single MEGA_LINKS secret banana (Python script included). |
 | **Concurrency guard** | Only 1 run at a time — parallel runs prevented. |
+| **Secret-based links** | `MEGA_LINKS` GitHub Secret is the source of truth — not the repo files. |
 
 ---
 
@@ -406,6 +411,8 @@ Your MEGA file links in JSON format — one line (minified):
 ```
 {"Bollywood Movies":["https://mega.nz/file/abc123#key1","https://mega.nz/file/def456#key2"],"Hollywood Movies":["https://mega.nz/file/ghi789#key3","https://mega.nz/file/jkl012#key4"]}
 ```
+
+> ⚠️ **Important:** Script repo file (`MEGA_LINKS_merged.json`) nahi, **GitHub Secret `MEGA_LINKS`** padhta hai. Isliye files update karne ka effect nahi hoga — secret update karna zaroori hai.
 
 **Rules:**
 - **Key** = GDrive folder name (automatically created)
@@ -539,36 +546,114 @@ https://mega.nz/file/def456#key2
 - Pehli baar setup kar rahe hain
 - GDrive se saari files delete karke fresh start karna chahte hain
 - Koi corruption hui hai state file mein (e.g., merge conflict markers)
+- Poora transfer dobara start karna chahte hain
 
 ### Reset kaise karein?
 
-**Method 1: GitHub API se (recommended)**
-```
-gh api -X PUT repos/shivamjislt97/MEGA-TO-GDRIVE-GITHUB-CRON/contents/completed_links.json \
-  -f message="reset state [skip ci]" \
-  -f content="eyJmb2xkZXJzIjoge319" \
-  -f sha=COMMIT_SHA \
-  -f branch=main
-```
-(COMMIT_SHA = current file SHA, `gh api repos/.../contents/completed_links.json --jq '.sha'` se milega)
+#### Method 1: GitHub Web UI (Sabse Easy — Recommended)
 
-**Method 2: Direct push (local repo)**
+1. Apne repo mein jao → `completed_links.json` file open karo
+2. ✏️ Edit button (pencil icon) click karo
+3. Puri file **replace** karo with:
+
+```json
+{"folders": {}}
+```
+
+4. Neeche "Commit changes" click karo
+   - Commit message: `reset state [skip ci]`
+   - Branch: `main`
+5. Ho gaya! File ab empty state dikhayegi
+6. Next workflow run **first folder se start hoga, saari files scratch se transfer hogi**
+
+#### Method 2: Local Git Push
+
 ```bash
+# 1. State file reset karo
 python -c "import json; json.dump({'folders':{}}, open('completed_links.json','w'), indent=2)"
+
+# 2. Git commit + push karo
 git add completed_links.json
 git commit -m "reset state [skip ci]"
 git push
 ```
 
-**Method 3: GitHub Web UI**
-1. `completed_links.json` file open karo
-2. ✏️ Edit button click karo
-3. Content replace karo with: `{"folders": {}}`
-4. "Commit changes" click karo (auto-commit to main)
+#### Method 3: GitHub CLI (gh)
+
+```bash
+# Current file SHA lo
+$sha = gh api repos/shivamjislt97/MEGA-TO-GDRIVE-GITHUB-CRON/contents/completed_links.json --jq '.sha'
+
+# File overwrite karo (content = base64 of '{"folders": {}}')
+gh api -X PUT repos/shivamjislt97/MEGA-TO-GDRIVE-GITHUB-CRON/contents/completed_links.json `
+  -f message="reset state [skip ci]" `
+  -f content="eyJmb2xkZXJzIjoge319" `
+  -f sha=$sha `
+  -f branch=main
+```
+
+---
+
+### Example: Reset ke baad kya hota hai?
+
+Maano pehle state tha:
+
+```json
+{
+  "folders": {
+    "Shorts": { "total": 45, "done": 45, "status": "completed" },
+    "Beautiful Girls": { "total": 208, "done": 18, "status": "active" }
+  },
+  "completed": [
+    { "url": "https://...", "filename": "video1.mp4", ... },
+    { "url": "https://...", "filename": "video2.mp4", ... }
+  ],
+  "current_folder": "Beautiful Girls",
+  "oversized": []
+}
+```
+
+Reset ke **baad** state:
+
+```json
+{"folders": {}}
+```
+
+Agli run mein kya hoga:
+1. Script `MEGA_LINKS` secret se folders detect karega
+2. **Shorts** → `pending`, **Beautiful Girls** → `pending`
+3. `current_folder` = `null` → **Shorts** auto-activate hoga
+4. Saari **45 + 208 = 253 files** dobara process hogi
+5. Pehle se GDrive mein existing files hain toh **duplicate upload hogi** (rclone overwrite nahi karta)
+
+> ⚠️ **Warning:** Sirf tab reset karo jab sach mein fresh start chahiye. Agar sirf kuch files skip karni hain, toh `completed_links.json` manually edit karo (Web UI se) aur unwanted URLs `completed` array mein daal do.
+
+### Partial Reset — Sirf Ek Folder Reset Karna
+
+Agar ek folder ki files dobara chahiye (baaki folders ka state preserve rakhna hai):
+
+```json
+{
+  "folders": {
+    "Shorts": { "total": 45, "done": 45, "status": "completed" },
+    "Beautiful Girls": { "total": 208, "done": 0, "status": "pending" }
+  },
+  "completed": [],
+  "current_folder": null,
+  "oversized": []
+}
+```
+
+Yeh:
+- Shorts ka progress **preserve** karega (45/45 done)
+- Beautiful Girls ki saari files **reset** karega (0/208, wapas pending)
+- `completed` array **empty** karega (Beautiful Girls ki files dobara download hogi)
+- Oversized list **clear** karega
 
 ### Reset ke baad kya hota hai?
 - Saare folders wapas `pending` state mein aa jayenge
 - `current_folder` null ho jayega
+- `completed` array empty ho jayega
 - Agli run first folder se start hogi, saari files from scratch process hogi
 
 ---
@@ -672,61 +757,55 @@ if rclone returns non-zero → RuntimeError → skip to next file (TEMP_DIR clea
 
 ## Log Output Examples
 
-### Normal Run (Mid-Progress)
+### Normal Run (Mid-Progress — Current Clean Style)
 
 ```
 =======================================================
-  MEGA -> GDrive Transfer | 2025-01-15 10:30:00
+  MEGA -> GDrive Transfer | 2026-07-16 23:26:08
 =======================================================
-  Artifact loaded: 5 completed files, 0 oversized
-  Total pending: 15
+  Artifact loaded: 58 completed files, 0 oversized
+  Total pending: 195
 -------------------------------------------------------
-  [ACTIVE] Bollywood Movies: 5/10
-  [WAIT] Hollywood Movies: 0/8
+  [DONE] Shorts: 45/45
+  [ACTIVE] Beautiful Girls: 13/208
 -------------------------------------------------------
-
-  Active: [Bollywood Movies] -> 5 files pending
+  Active: [Beautiful Girls] -> 195 files pending
 =======================================================
 
-  --- [1/5] Bollywood Movies ---
-  Fetching: https://mega.nz/file/abc123...
-  [Bollywood Movies] "Interstellar.mp4" | Size: 2.3 GB
-  DOWNLOADING: "Interstellar.mp4"...
-  Downloaded: 2.3 GB
-  UPLOADING to GDrive/MEGA_Transfer/Bollywood Movies/...
-  Uploaded: "Interstellar.mp4"
-  Verifying...
-  VERIFIED: "Interstellar.mp4" (2.3 GB)
-  Artifact saved: 6/10 done
-  [1/5] Complete | Quota: 2.3/5.0 GB
+  --- [1/195] Beautiful Girls ---
+  Fetching: https://mega.nz/file/3XZm2I5L#WMmGkGhyKDkKVMSlHaENNXrM5UgJvv...
+  [Beautiful Girls] "1169470_720.mp4" | Size: 483.3 MB
+  DOWNLOADING: "1169470_720.mp4" (483.3 MB)...
+  Downloaded: 483.3 MB in 12s
+  UPLOADING: "1169470_720.mp4" (483.3 MB) to GDrive/MEGA_Transfer/Beautiful Girls/...
+  Uploaded: "1169470_720.mp4" (483.3 MB in 28s)
+  Artifact+Git saved: 14/208 done
+  [1/195] Complete | Quota: 483.3 MB/5.0 GB
   --------------------------------------------------
 
-  --- [2/5] Bollywood Movies ---
-  Fetching: https://mega.nz/file/def456...
-  [Bollywood Movies] "Inception.mp4" | Size: 1.1 GB
-  DOWNLOADING: "Inception.mp4"...
-  Downloaded: 1.1 GB
+  --- [2/195] Beautiful Girls ---
+  Fetching: https://mega.nz/file/CXR1mQgA#0TWKfAWMYt15mkf-IYG9ufZ243af7I...
+  [Beautiful Girls] "1186769_720.mp4" | Size: 287.5 MB
+  DOWNLOADING: "1186769_720.mp4" (287.5 MB)...
+  Downloaded: 287.5 MB in 11s
   UPLOADING...
-  Uploaded: "Inception.mp4"
-  VERIFIED: "Inception.mp4" (1.1 GB)
-  Artifact saved: 7/10 done
-  [2/5] Complete | Quota: 3.4/5.0 GB
+  Uploaded: "1186769_720.mp4" (287.5 MB in 61s)
+  Artifact+Git saved: 15/208 done
+  [2/195] Complete | Quota: 770.7 MB/5.0 GB
   --------------------------------------------------
 
   ... (more files) ...
 
-  [Bollywood Movies] Progress: 7/10
-
 =======================================================
   RUN SUMMARY
   --------------------------------------------------
-  Processed: 2 files
+  Processed: 5 files
   Quota used: 3.4 GB / 5.0 GB
-  [ACTIVE] Bollywood Movies: 7/10
-  [WAIT] Hollywood Movies: 0/8
+  [DONE] Shorts: 45/45
+  [ACTIVE] Beautiful Girls: 18/208
 =======================================================
 
-  8 files remaining - next cycle will continue
+  5 files transferred — next cycle auto-continues
 ```
 
 ### Quota Exhausted
@@ -779,6 +858,9 @@ if rclone returns non-zero → RuntimeError → skip to next file (TEMP_DIR clea
 | State file corrupted/merge conflict | Git pull --rebase conflict in completed_links.json | Reset state using methods in "Resetting Completion List" section |
 | 422 error on workflow_dispatch | YAML parse error (inline Python broke YAML) | Fixed! Python code extracted to auto_trigger.py |
 | mega.py ImportError / asyncio.coroutine error | Python 3.12+ removed coroutine() | Fixed! Script adds fallback: `asyncio.coroutine = lambda c: c` |
+| mega.py download hung / timeout | mega.py download_url() hangs on broken links | Fixed! Removed mega.py download — only megadl with 600s timeout |
+| Log mein megadl progress lines aa rahi hain | Script was printing megadl stdout | Fixed! megadl stdout captured but not printed — only clean DOWNLOADING/Downloaded shown |
+| MEGA_LINKS_merged.json update ka effect nahi ho raha | Secret used, not repo file | Update the `MEGA_LINKS` GitHub Secret directly, not the file |
 | Merged JSON mein links count mismatch | Multiple text files se merge karte waqt total galat ho raha | Ensure each text file ke URLs processed ho rahe hain — Python script se count check karo |
 
 ---
@@ -806,13 +888,13 @@ MEGA-TO-GDRIVE-GITHUB-CRON/
 
 | File | What It Does |
 |------|-------------|
-| mega_to_gdrive.py | Reads secrets, manages state, downloads via mega.py, uploads to GDrive via rclone, per-file git push |
+| mega_to_gdrive.py | Reads secrets, manages state, downloads via megadl (not mega.py), uploads to GDrive via rclone, per-file git push |
 | auto_trigger.py | Checks completed_links.json for remaining files; triggers next gh workflow run if needed; auto-stops when all folders complete |
 | mega_gdrive_transfer.yml | Defines GitHub Actions workflow: manual trigger, artifact steps, git backup, auto-trigger (skip on cancel) |
 | completed_links.json | Persistent state: tracks folders, completed files, current folder, oversized files; updated per-file via git push |
 | MEGA_LINKS.json | Shorts folder links (example source for MEGA_LINKS secret) |
 | MEGA_LINKS_Beautiful_Girls.json | Beautiful Girls folder links (example source) |
-| MEGA_LINKS_merged.json | Merged JSON from multiple text files — ready to paste into GitHub Secret |
+| MEGA_LINKS_merged.json | Merged JSON from multiple text files — backup reference only. **Script does NOT read this file** — update the GitHub Secret instead |
 | .github/Shorts/MEGA_LINKS.txt | Raw text file for Shorts (one URL per line) |
 | .github/Beautiful Girls/MEGA_LINKS.txt | Raw text file for Beautiful Girls (one URL per line) |
 | .gitignore | Prevents TEMP_DIR/ download directory from being committed to git |
@@ -851,7 +933,7 @@ MEGA-TO-GDRIVE-GITHUB-CRON/
    │   │    +-- Get metadata (mega.py get_public_url_info)    │   │
    │   │    +-- Check oversized (>5GB?) -> skip if yes        │   │
    │   │    +-- Check quota (<=5GB?) -> skip if no            │   │
-   │   │    +-- Download (mega.py download_url)               │   │
+   │   │    +-- Download (megadl --path -- 600s timeout)               │   │
    │   │    +-- Upload (rclone copy)                          │   │
    │   │    +-- Save + git push (per-file = crash-proof!)    │   │
    │   │    +-- Cleanup temp files                            │   │
@@ -868,7 +950,7 @@ MEGA-TO-GDRIVE-GITHUB-CRON/
    |  MEGA CLOUD   |   | GDRIVE CLOUD  |   |GITHUB REPO   |
    |               |   |               |   |  + ARTIFACT  |
    |  Source via   |   |  Destination  |   |               |
-   |  mega.py API  |   |  MEGA_Transfer|   |  State file   |
+   |  megadl CLI   |   |  MEGA_Transfer|   |  State file   |
    |  ~5GB quota   |   |  /{Folder}/   |   |  per-file     |
    |  per IP/day   |   |               |   |  git push     |
     +---------------+   +---------------+   +---------------+

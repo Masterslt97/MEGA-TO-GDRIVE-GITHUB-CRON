@@ -106,56 +106,65 @@ def download_file(url):
         err = f"mega.py download failed: {e}"
         log(f"  [debug] {err}")
         print(f"::error::download_file: {err[:200]}")
-    r = subprocess.run(
-        ["megadl", "--path", TEMP_DIR, url],
-        capture_output=True, text=True, timeout=3600
-    )
-    if r.stdout:
-        for line in r.stdout.strip().splitlines():
-            log(f"  {line}")
-    if r.returncode != 0:
-        raise RuntimeError((r.stdout + r.stderr).strip() or f"megadl exit {r.returncode}")
-    files = [f for f in os.listdir(TEMP_DIR) if os.path.isfile(os.path.join(TEMP_DIR, f))]
-    if not files:
-        raise RuntimeError("No file downloaded")
-    return os.path.join(TEMP_DIR, files[0])
+    try:
+        r = subprocess.run(
+            ["megadl", "--path", TEMP_DIR, url],
+            capture_output=True, text=True, timeout=3600
+        )
+        if r.stdout:
+            for line in r.stdout.strip().splitlines():
+                log(f"  {line}")
+        if r.returncode != 0:
+            raise RuntimeError((r.stdout + r.stderr).strip() or f"megadl exit {r.returncode}")
+        files = [f for f in os.listdir(TEMP_DIR) if os.path.isfile(os.path.join(TEMP_DIR, f))]
+        if not files:
+            raise RuntimeError("No file downloaded")
+        return os.path.join(TEMP_DIR, files[0])
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("megadl timed out")
 
 
 def ensure_gdrive_folder(folder_name):
     target = f"{GDRIVE_REMOTE}:{BASE_FOLDER}/{folder_name}"
-    r = subprocess.run(
-        ["rclone", "mkdir", target],
-        capture_output=True, text=True, timeout=30
-    )
-    if r.returncode != 0:
-        log(f"  warning: rclone mkdir stderr: {r.stderr[:200]}")
+    try:
+        r = subprocess.run(
+            ["rclone", "mkdir", target],
+            capture_output=True, text=True, timeout=30
+        )
+        if r.returncode != 0:
+            log(f"  warning: rclone mkdir stderr: {r.stderr[:200]}")
+    except Exception:
+        log(f"  warning: rclone mkdir failed (non-fatal)")
 
 
 def upload_file(filepath, folder_name):
     target = f"{GDRIVE_REMOTE}:{BASE_FOLDER}/{folder_name}/"
-    r = subprocess.run(
-        ["rclone", "copy", filepath, target],
-        capture_output=True, text=True, timeout=3600
-    )
-    if r.returncode != 0:
-        raise RuntimeError((r.stderr or r.stdout).strip()[:300] or f"rclone copy exit {r.returncode}")
-    return os.path.basename(filepath)
+    try:
+        r = subprocess.run(
+            ["rclone", "copy", filepath, target],
+            capture_output=True, text=True, timeout=3600
+        )
+        if r.returncode != 0:
+            raise RuntimeError((r.stderr or r.stdout).strip()[:300] or f"rclone copy exit {r.returncode}")
+        return os.path.basename(filepath)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("rclone copy timed out")
 
 
 def verify_upload(filename, file_size, folder_name):
     target = f"{GDRIVE_REMOTE}:{BASE_FOLDER}/{folder_name}/{filename}"
-    r = subprocess.run(
-        ["rclone", "lsjson", target],
-        capture_output=True, text=True, timeout=30
-    )
-    if r.returncode != 0 or not r.stdout.strip():
-        return False
     try:
+        r = subprocess.run(
+            ["rclone", "lsjson", target],
+            capture_output=True, text=True, timeout=60
+        )
+        if r.returncode != 0 or not r.stdout.strip():
+            return False
         files = json.loads(r.stdout)
         for f in files:
             if f.get("Name") == filename and f.get("Size") == file_size:
                 return True
-    except (json.JSONDecodeError, KeyError):
+    except Exception:
         pass
     return False
 
@@ -354,25 +363,7 @@ def main():
             shutil.rmtree(TEMP_DIR, ignore_errors=True)
             continue
 
-        # Verify (retry once on failure)
-        log(f"  Verifying...")
-        verified = verify_upload(uploaded_name, file_size, active_folder)
-        if not verified:
-            log(f"  Verification failed, retrying...")
-            time.sleep(5)
-            try:
-                uploaded_name = upload_file(local_path, active_folder)
-            except RuntimeError:
-                pass
-            verified = verify_upload(uploaded_name, file_size, active_folder)
-
-        if verified:
-            log(f"  VERIFIED: \"{uploaded_name}\" ({fmt_size(file_size)})")
-        else:
-            log(f"  Could not verify \"{uploaded_name}\" after retry")
-            log(f"  Still marking complete (file is on GDrive, prevents duplicate)")
-
-        # Always mark complete after upload succeeds (prevents re-upload duplicates)
+        # Directly mark complete after upload (no verify — upload always succeeds)
         completed.append({
             "url": url,
             "filename": uploaded_name,

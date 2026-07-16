@@ -63,11 +63,11 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git stash || true
-          git pull --rebase origin main || true
-          git stash pop || true
           git add completed_links.json
-          git diff --staged --quiet || git commit -m "update state [skip ci]" && git push
+          if git diff --staged --quiet; then exit 0; fi
+          git commit -m "update state [skip ci]"
+          git pull --rebase origin main || true
+          git push
 
       - name: Auto-trigger next if files remain
         if: always()
@@ -76,17 +76,17 @@ jobs:
         run: |
           python -c "
 import json
-d = json.load(open('completed_links.json'))
+try:
+    d = json.load(open('completed_links.json'))
+except Exception:
+    d = {'folders':{}}
 rem = sum(f['total']-f['done'] for f in d.get('folders',{}).values() if f.get('status')!='completed')
-print(f'Remaining: {rem}')
 if rem > 0:
-    import subprocess, sys
+    import subprocess
     r = subprocess.run(['gh','workflow','run','MEGA to Google Drive Transfer','--ref','main'], capture_output=True, text=True)
-    if r.returncode == 0:
-        print('Next cycle triggered')
-    else:
-        print(f'Trigger failed: {r.stderr.strip()}')
-    sys.exit(0 if r.returncode == 0 else 1)
+    print(f'Triggered next cycle (exit={r.returncode})' if r.returncode==0 else f'Trigger failed: {r.stderr.strip()}')
+else:
+    print('All done, no more cycles')
 "
 
 

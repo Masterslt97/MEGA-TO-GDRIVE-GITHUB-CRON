@@ -3,15 +3,15 @@
     "Shorts": {
       "total": 45,
       "done": 45,
-      "status": "active"
+      "status": "completed"
     },
     "Beautiful Girls": {
       "total": 208,
       "done": 0,
-      "status": "pending"
+      "status": "active"
     }
   },
-  "current_folder": "Shorts",
+  "current_folder": "Beautiful Girls",
   "completed": [
     {
       "url": "https://mega.nz/file/31wyBQyb#qah-zh8gRoG1x0OG-zPRFx1PUnDCPaSrcjp0-bGoURg",
@@ -328,5 +328,6 @@
       "target_folder": "Shorts",
       "completed_at": "2026-07-16T19:58:41Z"
     }
-  ]
+  ],
+  "oversized": []
 }

@@ -679,51 +679,55 @@ MEGA-TO-GDRIVE-GITHUB-CRON/
 ## Architecture Summary
 
 `
-┌─────────────────────────────────────────────────────────────────┐
-│                    GITHUB ACTIONS RUNNER                        │
-│                    (Ephemeral Linux VM)                         │
-│                                                                 │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │  GITHUB WORKFLOW                                         │   │
-│  │  ├── Checkout repo                                       │   │
-│  │  ├── Install megatools, rclone, Python                   │   │
-│  │  ├── Download artifact (completed_links.json)            │   │
-│  │  ├── Run mega_to_gdrive.py                               │   │
-│  │  ├── Upload artifact (overwrite completed_links.json)    │   │
-│  │  ├── Git commit + push (backup)                          │   │
-│  │  └── gh workflow run (trigger next cycle)                │   │
-│  └─────────────────────────────────────────────────────────┘   │
-│                               │                                  │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │  mega_to_gdrive.py (Python)                              │   │
-│  │                                                          │   │
-│  │  1. Load completed_links.json (artifact)                 │   │
-│  │  2. Parse MEGA_LINKS secret (JSON)                       │   │
-│  │  3. Find active folder → filter pending URLs             │   │
-│  │  4. FOR EACH pending URL:                                │   │
-│  │     ├── megadl --info → filename + size                  │   │
-│  │     ├── size > 5GB? → Mark oversized → skip forever      │   │
-│  │     ├── quota_used + size > 5GB? → Break (next run)      │   │
-│  │     ├── megadl --progress → download to /tmp/mega_temp   │   │
-│  │     ├── rclone mkdir → ensure GDrive folder exists       │   │
-│  │     ├── rclone copy --progress → upload to GDrive        │   │
-│  │     ├── rclone lsjson → verify filename + size match     │   │
-│  │     ├── Append to completed_links.json (per-file save!)  │   │
-│  │     ├── Delete temp file                                 │   │
-│  │     └── Log progress                                     │   │
-│  │  5. Check folder completion → auto-advance if needed     │   │
-│  │  6. Save final state                                     │   │
-│  └─────────────────────────────────────────────────────────┘   │
-│                               │                                  │
-└───────────────────────────────┼─────────────────────────────────┘
-                                │
-           ┌────────────────────┼────────────────────┐
-           ▼                    ▼                    ▼
-    ┌──────────┐         ┌──────────┐         ┌──────────┐
-    │  MEGA    │         │  GDRIVE  │         │ GITHUB   │
-    │  Cloud   │         │  Cloud   │         │ ARTIFACT │
-    │  (source)│         │  (dest)  │         │ (state)  │
-    └──────────┘         └──────────┘         └──────────┘
+   ┌─────────────────────────────────────────────────────────────┐
+   │                    GITHUB ACTIONS RUNNER                    │
+   │                    (Ephemeral Linux VM)                     │
+   │                                                             │
+   │   ┌─────────────────────────────────────────────────────┐   │
+   │   │  WORKFLOW (mega_gdrive_transfer.yml)                 │   │
+   │   │                                                     │   │
+   │   │  1. Checkout repo                                   │   │
+   │   │  2. Install megatools + rclone + Python             │   │
+   │   │  3. Download artifact (completed_links.json)        │   │
+   │   │  4. Run mega_to_gdrive.py  <- main logic            │   │
+   │   │  5. Upload artifact (overwrite)                     │   │
+   │   │  6. Git commit + push (backup)                      │   │
+   │   │  7. Trigger next cycle (gh workflow run)            │   │
+   │   └─────────────────────────────────────────────────────┘   │
+   │                             │                                │
+   │                             v                                │
+   │   ┌─────────────────────────────────────────────────────┐   │
+   │   │  PYTHON SCRIPT (mega_to_gdrive.py)                   │   │
+   │   │                                                     │   │
+   │   │  Load state -> Find active folder                   │   │
+   │   │         │                                            │   │
+   │   │         v                                            │   │
+   │   │  For each pending file:                             │   │
+   │   │    +-- Get metadata (megadl --info)                  │   │
+   │   │    +-- Check oversized (>5GB?) -> skip if yes        │   │
+   │   │    +-- Check quota (<=5GB?) -> skip if no            │   │
+   │   │    +-- Download (megadl --progress)                  │   │
+   │   │    +-- Upload (rclone copy --progress)               │   │
+   │   │    +-- Verify (rclone lsjson)                        │   │
+   │   │    +-- Save to artifact (per-file = crash-proof)     │   │
+   │   │    +-- Cleanup temp file                             │   │
+   │   │         │                                            │   │
+   │   │         v                                            │   │
+   │   │  Folder done? -> Auto-advance to next                │   │
+   │   └─────────────────────────────────────────────────────┘   │
+   └───────────────────────────┬─────────────────────────────────┘
+                               │
+           ┌───────────────────┴───────────────────┐
+           │                   │                   │
+           v                   v                   v
+   +---------------+   +---------------+   +---------------+
+   |  MEGA CLOUD   |   | GDRIVE CLOUD  |   |GITHUB ARTIFACT|
+   |               |   |               |   |               |
+   |  Source of    |   |  Destination  |   |  State file   |
+   |  video files  |   |  MEGA_Transfer|   |  completed_   |
+   |  ~5GB quota   |   |  /{Folder}/   |   |  links.json   |
+   |  per IP/day   |   |               |   |  90 day keep  |
+    +---------------+   +---------------+   +---------------+
 `
 
 ---
@@ -731,4 +735,5 @@ MEGA-TO-GDRIVE-GITHUB-CRON/
 ## License
 
 Free to use. Made by Shivam.
+
 

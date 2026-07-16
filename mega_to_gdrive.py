@@ -70,6 +70,7 @@ def get_file_info(url):
             return name, size
     except Exception as e:
         log(f"  [debug] mega.py error: {e}")
+        print(f"::error::get_file_info: {e}")
     try:
         r = subprocess.run(
             ["megadl", "--info", url],
@@ -97,7 +98,9 @@ def download_file(url):
         if files:
             return os.path.join(TEMP_DIR, files[0])
     except Exception as e:
-        log(f"  [debug] mega.py download failed: {e}")
+        err = f"mega.py download failed: {e}"
+        log(f"  [debug] {err}")
+        print(f"::error::download_file: {err[:200]}")
     r = subprocess.run(
         ["megadl", "--progress", "--path", TEMP_DIR, url],
         capture_output=True, text=True, timeout=3600
@@ -310,6 +313,7 @@ def main():
                 log(f"  {processed} files done this run.")
                 break
             log(f"  Download failed: {msg[:200]}")
+            print(f"::error::download failed: {msg[:200]}")
             continue
 
         # If metadata was missing, use values from downloaded file

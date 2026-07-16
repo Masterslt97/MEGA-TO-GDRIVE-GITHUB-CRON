@@ -124,25 +124,14 @@ def get_file_info(url):
     return None, None
 
 
-def download_file(url):
+def download_file(url, timeout=600):
     if os.path.isdir(TEMP_DIR):
         shutil.rmtree(TEMP_DIR)
     os.makedirs(TEMP_DIR, exist_ok=True)
-    # Try mega.py first (more reliable), fallback to megadl
-    try:
-        from mega import Mega
-        Mega().download_url(url, dest_path=TEMP_DIR)
-        files = [f for f in os.listdir(TEMP_DIR) if os.path.isfile(os.path.join(TEMP_DIR, f))]
-        if files:
-            return os.path.join(TEMP_DIR, files[0])
-    except Exception as e:
-        err = f"mega.py download failed: {e}"
-        log(f"  [debug] {err}")
-        print(f"::error::download_file: {err[:200]}")
     try:
         r = subprocess.run(
             ["megadl", "--path", TEMP_DIR, url],
-            capture_output=True, text=True, timeout=3600
+            capture_output=True, text=True, timeout=timeout
         )
         if r.stdout:
             for line in r.stdout.strip().splitlines():

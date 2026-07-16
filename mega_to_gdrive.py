@@ -63,7 +63,12 @@ def git_push(quiet=False):
             ["git", "pull", "--rebase", "origin", "main"],
             capture_output=True, timeout=30
         )
-        subprocess.run(["git", "push"], capture_output=True, timeout=30)
+        r = subprocess.run(["git", "push"], capture_output=True, text=True, timeout=30)
+        if r.returncode != 0:
+            err = r.stderr.strip() or r.stdout.strip()
+            if not quiet:
+                log(f"  [git] push failed: {err}")
+            return
         if not quiet:
             log("  [git] state pushed to repo")
     except subprocess.TimeoutExpired:

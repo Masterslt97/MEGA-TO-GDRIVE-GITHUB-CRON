@@ -42,7 +42,7 @@ Instead of scanning GDrive every run (slow, 10-30 sec), we use **GitHub Artifact
 
 ### Main Workflow (Top-Level View)
 
-`
+```
     ┌──────────────────────────────────────────┐
     │          GITHUB ACTIONS CRON              │
     │          Runs every 5 minutes             │
@@ -101,13 +101,13 @@ Instead of scanning GDrive every run (slow, 10-30 sec), we use **GitHub Artifact
     ┌──────────────────────────────────────────┐
     │            WORKFLOW END                  │
     └──────────────────────────────────────────┘
-`
+```
 
 ### Per-File Processing (Detailed)
 
 When Phase 4 starts, each file goes through these steps:
 
-`
+```
     ┌─────────────────────────────────────────────────────┐
     │              START PROCESSING ONE FILE               │
     └─────────────────────────┬───────────────────────────┘
@@ -218,11 +218,11 @@ When Phase 4 starts, each file goes through these steps:
     ┌─────────────────────────────────────────────────────┐
     │  Return to "More files?" check in Main Diagram      │
     └─────────────────────────────────────────────────────┘
-`
+```
 
 ### Multi-Run Progression Example
 
-`
+```
         RUN 1                        RUN 2                        RUN 3                        RUN 4
   ┌──────────────────┐      ┌──────────────────┐      ┌──────────────────┐      ┌──────────────────┐
   │ Artifact: empty  │      │ Artifact: 5 done │      │ Artifact:10 done │      │ Artifact:13 done │
@@ -242,7 +242,7 @@ When Phase 4 starts, each file goes through these steps:
                                                                                              │   ALL DONE !    │
                                                                                              │  30/30 files    │
                                                                                              └──────────────────┘
-`
+```
 ## Artifact System Explained
 
 ### What is an Artifact?
@@ -251,12 +251,12 @@ GitHub Actions **Artifacts** are files that persist **across workflow runs**. Un
 
 ### How We Use Artifacts
 
-`
+```
 Run 1:  [No artifact] → Create empty state → Process → Upload artifact
 Run 2:  [Download artifact] → Read state → Process more → Upload (overwrite)
 Run 3:  [Download artifact] → Read state → Process more → Upload (overwrite)
 ...
-`
+```
 
 ### Artifact File Structure (completed_links.json)
 
@@ -293,19 +293,19 @@ Run 3:  [Download artifact] → Read state → Process more → Upload (overwrit
     }
   ]
 }
-`
+```
 
 ### Crash-Proof Design
 
 Every successful file upload → **immediately saved to artifact** on disk:
 
-`
+```
 Process File 1 → Save artifact ✅
 Process File 2 → Save artifact ✅
 Process File 3 → 💥 CRASH (VM dies)
 Next Run → Download artifact → Files 1,2 are already completed → Skip!
              → Start from File 3 (not from beginning!)
-`
+```
 
 ---
 
@@ -315,7 +315,8 @@ Next Run → Download artifact → Files 1,2 are already completed → Skip!
 |---------|-------------|
 | **Multi-folder** | JSON-based folder mapping. Each key = GDrive folder name. Auto-created via rclone mkdir. |
 | **Artifact state** | Per-file artifact save. Crash-proof — agli run wahi se resume karega. |
-| **No full GDrive scan** | Single-file clone lsjson verification (1-2 sec per file vs 10-30 sec for full scan). |
+| **No full GDrive scan** | Single-file 
+clone lsjson verification (1-2 sec per file vs 10-30 sec for full scan). |
 | **Smart quota** | Har file se pehle metadata fetch → size check. Agar quota exceed hone wala ho → skip gracefully. |
 | **Oversized handling** | Files >5GB separated in oversized list. Manual handling ke liye alag category. |
 | **Folder auto-advance** | Ek folder complete → next pending folder automatically active. |
@@ -341,7 +342,7 @@ Next Run → Download artifact → Files 1,2 are already completed → Skip!
 `ash
 git clone https://github.com/your-username/MEGA-TO-GDRIVE-GITHUB-CRON.git
 cd MEGA-TO-GDRIVE-GITHUB-CRON
-`
+```
 
 ### Step 2: Get Your rclone Config
 
@@ -353,10 +354,10 @@ curl -s https://rclone.org/install.sh | sudo bash
 
 # Configure Google Drive remote
 rclone config
-`
+```
 
 Follow the prompts:
-`
+```
 n) New remote
 name> gdrive
 Storage> drive
@@ -367,22 +368,22 @@ root_folder_id> (press Enter)
 service_account_file> (press Enter)
 Edit advanced config? n
 Use auto config? y
-`
+```
 
 After setup, view your config:
 `ash
 rclone config show gdrive
-`
+```
 
 Copy the **entire output** — it looks like:
-`
+```
 [gdrive]
 type = drive
 client_id = 202264815644.apps.googleusercontent.com
 client_secret = X4Z3ca8xfWDb1Voo-F9a7ZxJ
 scope = drive
 token = {"access_token":"...","refresh_token":"..."}
-`
+```
 
 ### Step 3: Add GitHub Secrets
 
@@ -392,9 +393,9 @@ Go to your repo → **Settings → Secrets and variables → Actions → New rep
 
 Your MEGA file links in JSON format — one line (minified):
 
-`
+```
 {"Bollywood Movies":["https://mega.nz/file/abc123#key1","https://mega.nz/file/def456#key2"],"Hollywood Movies":["https://mega.nz/file/ghi789#key3","https://mega.nz/file/jkl012#key4"]}
-`
+```
 
 **Rules:**
 - **Key** = GDrive folder name (automatically created)
@@ -404,16 +405,17 @@ Your MEGA file links in JSON format — one line (minified):
 
 #### Secret 2: RCLONE_CONF
 
-Paste the **entire output** of clone config show gdrive
+Paste the **entire output** of 
+clone config show gdrive
 
-`
+```
 [gdrive]
 type = drive
 client_id = 202264815644.apps.googleusercontent.com
 client_secret = X4Z3ca8xfWDb1Voo-F9a7ZxJ
 scope = drive
 token = {"access_token":"...","refresh_token":"..."}
-`
+```
 
 ### Step 4: Run the Workflow
 
@@ -433,7 +435,7 @@ The workflow will also run automatically via cron every 5 minutes.
 **Correct format (one line, minified):**
 `json
 {"FolderA":["https://mega.nz/file/abc#key","https://mega.nz/file/def#key"],"FolderB":["https://mega.nz/file/ghi#key"]}
-`
+```
 
 **Readable version (for understanding, do NOT use in secret):**
 `json
@@ -446,13 +448,13 @@ The workflow will also run automatically via cron every 5 minutes.
     "https://mega.nz/file/ghi789#key3"
   ]
 }
-`
+```
 
 **❌ Wrong format (plain text — will cause JSON parse error):**
-`
+```
 https://mega.nz/file/abc123#key1
 https://mega.nz/file/def456#key2
-`
+```
 
 ---
 
@@ -473,14 +475,14 @@ MEGA free accounts limit download bandwidth to approximately **5GB per day** per
 
 ### Example Quota Scenario
 
-`
+```
 Run starts: quota_used = 0GB, quota_max = 5GB
 
 File 1: size = 1.2GB → 0 + 1.2 = 1.2 ≤ 5 → ✅ Download + Upload
 File 2: size = 2.3GB → 1.2 + 2.3 = 3.5 ≤ 5 → ✅ Download + Upload
 File 3: size = 1.8GB → 3.5 + 1.8 = 5.3 > 5 → ⏭️ Skip (next run)
 File 4: size = 800MB → (Not checked, loop already broke)
-`
+```
 
 ---
 
@@ -500,7 +502,7 @@ File 4: size = 800MB → (Not checked, loop already broke)
 
 ### Visualization
 
-`
+```
 Initial:  Bollywood [pending]  Hollywood [pending]  WebSeries [pending]
           ↓ (auto-activate first)
 Run 1-3:  Bollywood [▶️ active]   Hollywood [pending]   WebSeries [pending]
@@ -510,7 +512,7 @@ Run 4:    Bollywood [✅ done]     Hollywood [▶️ active]  WebSeries [pending
 Run 5:    Bollywood [✅ done]     Hollywood [✅ done]    WebSeries [▶️ active]
           ↓ (WebSeries done)
 Final:    ALL DONE! 🎉
-`
+```
 
 ---
 
@@ -522,12 +524,12 @@ Instead of scanning the entire GDrive folder (slow), we verify **one file at a t
 
 `python
 rclone lsjson gdrive:MEGA_Transfer/Bollywood/Interstellar.mp4
-`
+```
 
 Returns:
 `json
 [{"Name": "Interstellar.mp4", "Size": 2454900000, ...}]
-`
+```
 
 **We check two things:**
 1. **Filename** = Exact match
@@ -547,7 +549,7 @@ Returns:
 
 ### Normal Run (Mid-Progress)
 
-`
+```
 =======================================================
   MEGA -> GDrive Transfer | 2025-01-15 10:30:00
 =======================================================
@@ -600,39 +602,39 @@ Returns:
 =======================================================
 
   8 files remaining - next cycle will continue
-`
+```
 
 ### Quota Exhausted
 
-`
+```
   --- [3/5] Bollywood Movies ---
   Fetching: https://mega.nz/file/ghi789...
   [Bollywood Movies] "Tenet.mp4" | Size: 2.0 GB
   Quota full: 3.4 GB + 2.0 GB = 5.4 GB > 5GB
   Skipping "Tenet.mp4" for this run
-`
+```
 
 ### Oversized File Detected
 
-`
+```
   --- [3/5] Bollywood Movies ---
   Fetching: https://mega.nz/file/xyz789...
   [Bollywood Movies] "BigVideo_6GB.mp4" | Size: 6.0 GB
   OVERSIZED: BigVideo_6GB.mp4 (6.0 GB) > 5GB
-`
+```
 
 ### Folder Complete
 
-`
+```
   FOLDER COMPLETE: [Bollywood Movies] - 10/10 files
   Next folder: [Hollywood Movies] - 0/8
-`
+```
 
 ### All Done
 
-`
+```
   ALL FOLDERS COMPLETE! Sab files transfer ho gayi!
-`
+```
 
 ---
 
@@ -641,7 +643,8 @@ Returns:
 | Problem | Cause | Solution |
 |---------|-------|----------|
 | MEGA_LINKS is not valid JSON | Secret is plain text, not JSON | Convert links to {"Folder":["url1","url2"]} format minified |
-| RCLONE_CONF secret is empty | Secret not set | Add RCLONE_CONF with output of clone config show gdrive |
+| RCLONE_CONF secret is empty | Secret not set | Add RCLONE_CONF with output of 
+clone config show gdrive |
 | Artifact download warning in first run | No artifact exists yet | Normal! continue-on-error: true handles it |
 | Quota hit mid-download | MEGA bandwidth exhausted | Expected! Next run gets fresh quota |
 | File stuck in "pending" but already in GDrive | Artifact lost, URL not marked done | Check completed_links.json in git backup |
@@ -654,7 +657,7 @@ Returns:
 
 ## Files
 
-`
+```
 MEGA-TO-GDRIVE-GITHUB-CRON/
 ├── .github/
 │   └── workflows/
@@ -663,7 +666,7 @@ MEGA-TO-GDRIVE-GITHUB-CRON/
 ├── completed_links.json                ← Artifact state file (auto-generated, git-tracked)
 ├── .gitignore                          ← Ignores mega_temp/ (downloads)
 └── README.md                           ← This file
-`
+```
 
 ### File Responsibilities
 
@@ -678,7 +681,7 @@ MEGA-TO-GDRIVE-GITHUB-CRON/
 
 ## Architecture Summary
 
-`
+```
    ┌─────────────────────────────────────────────────────────────┐
    │                    GITHUB ACTIONS RUNNER                    │
    │                    (Ephemeral Linux VM)                     │
@@ -728,12 +731,13 @@ MEGA-TO-GDRIVE-GITHUB-CRON/
    |  ~5GB quota   |   |  /{Folder}/   |   |  links.json   |
    |  per IP/day   |   |               |   |  90 day keep  |
     +---------------+   +---------------+   +---------------+
-`
-
+```
 ---
 
 ## License
 
 Free to use. Made by Shivam.
+
+
 
 

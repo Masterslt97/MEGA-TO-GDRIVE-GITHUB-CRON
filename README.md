@@ -331,6 +331,7 @@ Next Run → git pull → File 1,2 already in state → Skip!
 | **Git backup** | Dual protection: Artifact + per-file git push. Har file ka record safe. |
 | **Auto-trigger** | Files baki hain? → Next cycle automatically trigger via gh workflow run (skip on cancellation). |
 | **Auto-stop** | Saare folders complete → no more cycles triggered. |
+| **Multi-file merge** | Multiple `.txt` files ko merge karke ek single MEGA_LINKS secret banana (Python script included). |
 | **Concurrency guard** | Only 1 run at a time — parallel runs prevented. |
 
 ---
@@ -434,18 +435,40 @@ Output copy karo aur GitHub Secret mein paste karo. Example output:
 {"FolderName":["https://mega.nz/file/abc#key1","https://mega.nz/file/def#key2","https://mega.nz/file/ghi#key3"]}
 ```
 
-**Multiple folders example:**
+**Multi-Folder JSON from Multiple Text Files:**
 
-Agar do folder ek saath chahiye:
+Agar aapke paas **do alag folders ke liye do alag text files** hain, toh ek single merged JSON banana hoga:
 
+```python
+import json
+
+# Har folder ke text file se URLs read karo
+shorts_urls = [l.strip() for l in open('Shorts/MEGA_LINKS.txt') if l.strip()]
+bg_urls = [l.strip() for l in open('.github/Beautiful Girls/MEGA_LINKS.txt') if l.strip()]
+
+print(f'Shorts: {len(shorts_urls)} URLs')
+print(f'Beautiful Girls: {len(bg_urls)} URLs')
+
+# Merged JSON with two folders
+merged = {
+    "Shorts": shorts_urls,
+    "Beautiful Girls": bg_urls
+}
+
+# Minified JSON output (GitHub Secret mein paste karna)
+print(json.dumps(merged, separators=(',', ':')))
 ```
-python -c "import json; s=open('Shorts.txt').readlines()+open('Movies.txt').readlines(); print('Too complex — manually merge')"
-```
 
-Manually merge karo:
+**Output — directly paste into GitHub Secret:**
 
 ```json
-{"Shorts":["https://mega.nz/file/abc#key1"],"Beautiful Girls":["https://mega.nz/file/def#key2","https://mega.nz/file/ghi#key3"]}
+{"Shorts":["https://mega.nz/file/abc#key1","https://mega.nz/file/def#key2"],"Beautiful Girls":["https://mega.nz/file/xyz#key3","https://mega.nz/file/uvw#key4"]}
+```
+
+**Ek command mein (one-liner):**
+
+```bash
+python -c "import json; s=[l.strip() for l in open('Shorts/MEGA_LINKS.txt') if l.strip()]; b=[l.strip() for l in open('.github/Beautiful Girls/MEGA_LINKS.txt') if l.strip()]; print(json.dumps({'Shorts':s,'Beautiful Girls':b}, separators=(',',':')))"
 ```
 
 #### Secret 2: RCLONE_CONF
@@ -756,6 +779,7 @@ if rclone returns non-zero → RuntimeError → skip to next file (TEMP_DIR clea
 | State file corrupted/merge conflict | Git pull --rebase conflict in completed_links.json | Reset state using methods in "Resetting Completion List" section |
 | 422 error on workflow_dispatch | YAML parse error (inline Python broke YAML) | Fixed! Python code extracted to auto_trigger.py |
 | mega.py ImportError / asyncio.coroutine error | Python 3.12+ removed coroutine() | Fixed! Script adds fallback: `asyncio.coroutine = lambda c: c` |
+| Merged JSON mein links count mismatch | Multiple text files se merge karte waqt total galat ho raha | Ensure each text file ke URLs processed ho rahe hain — Python script se count check karo |
 
 ---
 
@@ -765,12 +789,17 @@ if rclone returns non-zero → RuntimeError → skip to next file (TEMP_DIR clea
 MEGA-TO-GDRIVE-GITHUB-CRON/
 ├── .github/
 │   └── workflows/
-│       └── mega_gdrive_transfer.yml    ← GitHub Actions workflow (manual + auto-trigger)
-├── mega_to_gdrive.py                   ← Main transfer script (all logic)
-├── auto_trigger.py                     ← Auto-trigger next cycle if files remain
-├── completed_links.json                ← State file (auto-generated, per-file git push)
-├── .gitignore                          ← Ignores TEMP_DIR (downloads)
-└── README.md                           ← This file
+│       └── mega_gdrive_transfer.yml       ← GitHub Actions workflow (manual + auto-trigger)
+├── mega_to_gdrive.py                      ← Main transfer script (all logic)
+├── auto_trigger.py                        ← Auto-trigger next cycle if files remain
+├── completed_links.json                   ← State file (auto-generated, per-file git push)
+├── MEGA_LINKS.json                        ← Shorts folder links (example)
+├── MEGA_LINKS_Beautiful_Girls.json        ← Beautiful Girls folder links (example)
+├── MEGA_LINKS_merged.json                 ← Merged JSON from multiple text files
+├── .github/Shorts/MEGA_LINKS.txt          ← Source text file for Shorts
+├── .github/Beautiful Girls/MEGA_LINKS.txt ← Source text file for Beautiful Girls
+├── .gitignore                             ← Ignores TEMP_DIR (downloads)
+└── README.md                              ← This file
 ```
 
 ### File Responsibilities
@@ -778,9 +807,14 @@ MEGA-TO-GDRIVE-GITHUB-CRON/
 | File | What It Does |
 |------|-------------|
 | mega_to_gdrive.py | Reads secrets, manages state, downloads via mega.py, uploads to GDrive via rclone, per-file git push |
-| auto_trigger.py | Checks completed_links.json for remaining files; triggers next gh workflow run if needed |
+| auto_trigger.py | Checks completed_links.json for remaining files; triggers next gh workflow run if needed; auto-stops when all folders complete |
 | mega_gdrive_transfer.yml | Defines GitHub Actions workflow: manual trigger, artifact steps, git backup, auto-trigger (skip on cancel) |
-| completed_links.json | Persistent state: tracks folders, completed files, current folder, oversized files |
+| completed_links.json | Persistent state: tracks folders, completed files, current folder, oversized files; updated per-file via git push |
+| MEGA_LINKS.json | Shorts folder links (example source for MEGA_LINKS secret) |
+| MEGA_LINKS_Beautiful_Girls.json | Beautiful Girls folder links (example source) |
+| MEGA_LINKS_merged.json | Merged JSON from multiple text files — ready to paste into GitHub Secret |
+| .github/Shorts/MEGA_LINKS.txt | Raw text file for Shorts (one URL per line) |
+| .github/Beautiful Girls/MEGA_LINKS.txt | Raw text file for Beautiful Girls (one URL per line) |
 | .gitignore | Prevents TEMP_DIR/ download directory from being committed to git |
 
 ---

@@ -1,8 +1,6 @@
 name: MEGA to Google Drive Transfer
 
 on:
-  schedule:
-    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 permissions:
@@ -67,10 +65,4 @@ jobs:
           git add completed_links.json
           git diff --staged --quiet || git commit -m "update state [skip ci]" && git push
 
-      - name: Trigger next cycle
-        if: always()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          echo "Triggering next transfer cycle..."
-          gh workflow run "MEGA to Google Drive Transfer" --ref main 2>&1 && echo "Next cycle triggered!" || echo "Trigger failed (cron will retry)"
+

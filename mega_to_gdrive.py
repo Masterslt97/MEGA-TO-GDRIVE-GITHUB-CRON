@@ -62,6 +62,15 @@ def save_completed(state):
 
 def get_file_info(url):
     try:
+        from mega import Mega
+        info = Mega().get_public_url_info(url)
+        name = info.get("name")
+        size = info.get("size")
+        if name and size is not None:
+            return name, size
+    except Exception as e:
+        log(f"  [debug] mega.py error: {e}")
+    try:
         r = subprocess.run(
             ["megadl", "--info", url],
             capture_output=True, text=True, timeout=30
@@ -71,11 +80,8 @@ def get_file_info(url):
         size = re.search(r"\((\d+)\s*bytes?\)", out)
         if name and size:
             return name.group(1), int(size.group(1))
-        log(f"  [debug] --info output: {out[:250]}")
-    except subprocess.TimeoutExpired:
-        log(f"  [debug] --info timed out for {url[:50]}")
-    except Exception as e:
-        log(f"  [debug] --info error: {e}")
+    except Exception:
+        pass
     return None, None
 
 

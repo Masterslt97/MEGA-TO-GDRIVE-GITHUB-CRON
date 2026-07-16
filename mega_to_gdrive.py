@@ -124,7 +124,7 @@ def get_file_info(url):
     return None, None
 
 
-def download_file(url, timeout=600):
+def download_file(url, timeout=120):
     if os.path.isdir(TEMP_DIR):
         shutil.rmtree(TEMP_DIR)
     os.makedirs(TEMP_DIR, exist_ok=True)

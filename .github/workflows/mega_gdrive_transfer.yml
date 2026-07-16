@@ -70,7 +70,7 @@ jobs:
           git push
 
       - name: Auto-trigger next if files remain
-        if: always()
+        if: success() || failure()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python auto_trigger.py

@@ -66,13 +66,16 @@ def get_file_info(url):
             ["megadl", "--info", url],
             capture_output=True, text=True, timeout=30
         )
-        out = r.stdout.strip()
-        name = re.search(r"File:\s+(.+?)\s+\(", out)
+        out = (r.stdout + " " + r.stderr).strip()
+        name = re.search(r"(?:File|Name):\s*(.+?)\s*\(", out)
         size = re.search(r"\((\d+)\s*bytes?\)", out)
         if name and size:
             return name.group(1), int(size.group(1))
-    except Exception:
-        pass
+        log(f"  [debug] --info output: {out[:250]}")
+    except subprocess.TimeoutExpired:
+        log(f"  [debug] --info timed out for {url[:50]}")
+    except Exception as e:
+        log(f"  [debug] --info error: {e}")
     return None, None
 
 
@@ -258,32 +261,32 @@ def main():
         log(f"  Fetching: {url[:60]}...")
 
         filename, file_size = get_file_info(url)
-        if not filename or file_size is None:
-            log(f"  Could not get metadata for {url[:50]}... skipping")
-            continue
+        metadata_ok = filename and file_size is not None
 
-        log(f"  [{active_folder}] \"{filename}\" | Size: {fmt_size(file_size)}")
-
-        if file_size > QUOTA_MAX:
-            log(f"  OVERSIZED: {filename} ({fmt_size(file_size)}) > 5GB")
-            oversized.append({
-                "url": url, "filename": filename,
-                "size": file_size, "target_folder": active_folder
-            })
-            state["oversized"] = oversized
-            save_completed(state)
-            continue
-
-        if quota_used + file_size > QUOTA_MAX:
-            log(f"  Quota full: {fmt_size(quota_used)} + {fmt_size(file_size)} > 5GB")
-            log(f"  Skipping \"{filename}\" for this run")
-            break
+        if metadata_ok:
+            log(f"  [{active_folder}] \"{filename}\" | Size: {fmt_size(file_size)}")
+            if file_size > QUOTA_MAX:
+                log(f"  OVERSIZED: {filename} ({fmt_size(file_size)}) > 5GB")
+                oversized.append({
+                    "url": url, "filename": filename,
+                    "size": file_size, "target_folder": active_folder
+                })
+                state["oversized"] = oversized
+                save_completed(state)
+                continue
+            if quota_used + file_size > QUOTA_MAX:
+                log(f"  Quota full: {fmt_size(quota_used)} + {fmt_size(file_size)} > 5GB")
+                log(f"  Skipping \"{filename}\" for this run")
+                break
+        else:
+            log(f"  (metadata unavailable — downloading directly)")
 
         # Download
-        log(f"  DOWNLOADING: \"{filename}\"...")
+        log(f"  DOWNLOADING: \"{filename or '?'}\"...")
         try:
             local_path = download_file(url)
             actual_size = os.path.getsize(local_path)
+            actual_name = os.path.basename(local_path)
             log(f"  Downloaded: {fmt_size(actual_size)}")
         except RuntimeError as e:
             msg = str(e)
@@ -294,7 +297,26 @@ def main():
             log(f"  Download failed: {msg[:200]}")
             continue
 
-        quota_used += actual_size
+        # If metadata was missing, use values from downloaded file
+        if not metadata_ok:
+            filename = actual_name
+            file_size = actual_size
+            if file_size > QUOTA_MAX:
+                log(f"  OVERSIZED: {filename} ({fmt_size(file_size)}) > 5GB")
+                oversized.append({
+                    "url": url, "filename": filename,
+                    "size": file_size, "target_folder": active_folder
+                })
+                state["oversized"] = oversized
+                save_completed(state)
+                shutil.rmtree(TEMP_DIR, ignore_errors=True)
+                continue
+            if quota_used + file_size > QUOTA_MAX:
+                log(f"  Quota full after download ({fmt_size(quota_used)} + {fmt_size(file_size)} > 5GB)")
+                log(f"  Processing this file anyway (already downloaded), then stopping.")
+
+        quota_exhausted = (quota_used + file_size) >= QUOTA_MAX
+        quota_used += file_size
 
         # Upload
         log(f"  UPLOADING to GDrive/{BASE_FOLDER}/{active_folder}/...")
@@ -309,7 +331,7 @@ def main():
 
         # Verify
         log(f"  Verifying...")
-        verified = verify_upload(uploaded_name, actual_size, active_folder)
+        verified = verify_upload(uploaded_name, file_size, active_folder)
         if not verified:
             log(f"  Verification failed, retrying upload...")
             time.sleep(5)
@@ -318,10 +340,10 @@ def main():
             except RuntimeError:
                 shutil.rmtree(TEMP_DIR, ignore_errors=True)
                 continue
-            verified = verify_upload(uploaded_name, actual_size, active_folder)
+            verified = verify_upload(uploaded_name, file_size, active_folder)
 
         if verified:
-            log(f"  VERIFIED: \"{uploaded_name}\" ({fmt_size(actual_size)})")
+            log(f"  VERIFIED: \"{uploaded_name}\" ({fmt_size(file_size)})")
         else:
             log(f"  Could not verify \"{uploaded_name}\" after retry")
             shutil.rmtree(TEMP_DIR, ignore_errors=True)
@@ -331,7 +353,7 @@ def main():
         completed.append({
             "url": url,
             "filename": uploaded_name,
-            "size": actual_size,
+            "size": file_size,
             "target_folder": active_folder,
             "completed_at": timestamp()
         })
@@ -347,6 +369,10 @@ def main():
         processed += 1
         log(f"  [{idx}/{total}] Complete | Quota: {fmt_size(quota_used)}/{fmt_size(QUOTA_MAX)}")
         log(f"  {'-' * 50}")
+
+        if quota_exhausted:
+            log(f"  Quota exhausted — remaining files will be processed next run.")
+            break
 
     # Folder completion check
     fdata = folders[active_folder]

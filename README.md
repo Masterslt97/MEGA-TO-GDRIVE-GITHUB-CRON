@@ -14,7 +14,7 @@ Multi-folder file transfer system from MEGA to Google Drive using GitHub Actions
 - [Secret Formats](#secret-formats)
 - [How Quota Is Managed](#how-quota-is-managed)
 - [Folder Auto-Advance](#folder-auto-advance)
-- [Verification Logic](#verification-logic)
+- [Upload Strategy](#upload-strategy)
 - [Log Output Examples](#log-output-examples)
 - [Troubleshooting](#troubleshooting)
 - [Files](#files)
@@ -29,12 +29,25 @@ MEGA free accounts have a **~5GB daily download quota**. GitHub Actions runners 
 
 ### The Solution
 
-Instead of scanning GDrive every run (slow, 10-30 sec), we use **GitHub Artifacts** to maintain a persistent completed_links.json file that tracks:
+Instead of scanning GDrive every run (slow, 10-30 sec), we use **GitHub Artifacts** + **git** to maintain a persistent `completed_links.json` file that tracks:
 
 - Which **files** are already uploaded (per URL)
 - Which **folders** are active/completed/pending
 - Which **folder** is currently being processed
 - Which **oversized files** (>5GB) need manual handling
+
+### Key Changes from v1
+
+| Change | Old Way | New Way |
+|--------|---------|---------|
+| **Metadata fetch** | `megadl --info` (CLI flag unsupported in older versions) | `mega.py` Python library (`get_public_url_info()`) |
+| **Download** | `megadl --progress` (CLI flag unsupported) | `mega.py` Python library (`download_url()`) |
+| **Upload verify** | `rclone lsjson` check after upload (could timeout/crash) | No verify — upload directly marks complete. Upload always succeeds or raises error |
+| **State save** | End of workflow via artifact + git | **Per-file git push** — har file ke baad immediate commit+push to repo |
+| **Auto-trigger** | Always runs (even on cancellation) | Only on `success()` or `failure()`, not on cancellation |
+| **Inline Python** | Inline `python -c "..."` in YAML (broke YAML parsing) | Standalone `auto_trigger.py` file |
+| **Python compat** | — | `asyncio.coroutine` fallback for Python 3.12+ |
+| **Schedule** | Cron every 5 minutes | No cron — only manual + auto-trigger when files remain |
 
 ---
 
@@ -44,22 +57,23 @@ Instead of scanning GDrive every run (slow, 10-30 sec), we use **GitHub Artifact
 
 ```
     ┌──────────────────────────────────────────┐
-    │          GITHUB ACTIONS CRON              │
-    │          Runs every 5 minutes             │
+    │    MANUAL TRIGGER or AUTO-TRIGGER        │
+    │    (No cron - only on demand)            │
     └─────────────────┬────────────────────────┘
                       │ Trigger
                       ▼
     ┌──────────────────────────────────────────┐
     │  PHASE 1: SETUP                          │
     │  Install megatools + rclone + Python     │
-    │  Write rclone.conf from secret           │
+    │  pip install mega.py                     │
     └─────────────────┬────────────────────────┘
                       │
                       ▼
     ┌──────────────────────────────────────────┐
     │  PHASE 2: LOAD STATE                     │
-    │  Download artifact (completed_links.json)│
-    │  First run = empty = no error            │
+    │  git pull → completed_links.json         │
+    │  + Download artifact (backup)            │
+    │  First run = {"folders":{}               │
     └─────────────────┬────────────────────────┘
                       │
                       ▼
@@ -75,6 +89,7 @@ Instead of scanning GDrive every run (slow, 10-30 sec), we use **GitHub Artifact
     ┌──────────────────────────────────────────┐
     │  PHASE 4: PROCESS ONE FILE               │
     │  (See "Per-File Processing" below)       │
+    │  After each file: git push state         │
     └─────────────────┬────────────────────────┘
                       │
          ┌────────────┴────────────┐
@@ -93,8 +108,10 @@ Instead of scanning GDrive every run (slow, 10-30 sec), we use **GitHub Artifact
     │     If done: mark complete               │
     │     Activate next folder                 │
     │  2. Upload artifact (overwrite)          │
-    │  3. Git commit + push (backup)           │
-    │  4. Trigger next cycle if pending        │
+    │  3. Git commit + push (final backup)     │
+    │  4. Auto-trigger? Only if not cancelled  │
+    │     (if: success() || failure())         │
+    │  5. Auto-stop if all folders done        │
     └─────────────────┬────────────────────────┘
                       │
                       ▼
@@ -114,11 +131,12 @@ When Phase 4 starts, each file goes through these steps:
                               │
                               ▼
     ┌─────────────────────────────────────────────────────┐
-    │  STEP A: GET FILE INFO                              │
+    │  STEP A: GET FILE INFO (via mega.py)                │
     │  ┌───────────────────────────────────────────────┐  │
-    │  │ Run: megadl --info <url>                      │  │
-    │  │ Output: filename + file_size (bytes)          │  │
-    │  │ No download yet - just metadata (~1-2 sec)    │  │
+    │  │ Mega().get_public_url_info(url)               │  │
+    │  │ Returns: (filename, size_bytes)               │  │
+    │  │ No download — pure metadata (~1-2 sec)        │  │
+    │  │ Fallback to megadl --info if mega.py fails    │  │
     │  └───────────────────────────────────────────────┘  │
     └─────────────────────────┬───────────────────────────┘
                               │
@@ -153,11 +171,11 @@ When Phase 4 starts, each file goes through these steps:
                               │ (only if quota OK)
                               ▼
     ┌─────────────────────────────────────────────────────┐
-    │  STEP D: DOWNLOAD FROM MEGA                         │
+    │  STEP D: DOWNLOAD FROM MEGA (via mega.py)           │
     │  ┌───────────────────────────────────────────────┐  │
-    │  │ megadl --progress --path /tmp/mega_temp       │  │
-    │  │ Shows: % complete, speed (MB/s), ETA          │  │
-    │  │ File saved: /tmp/mega_temp/<filename>         │  │
+    │  │ Mega().download_url(url, dest_path=TEMP_DIR)  │  │
+    │  │ Fallback: megadl --path TEMP_DIR <url>        │  │
+    │  │ File saved: TEMP_DIR/<filename>               │  │
     │  │ If quota exceeded mid-download → graceful exit│  │
     │  └───────────────────────────────────────────────┘  │
     └─────────────────────────┬───────────────────────────┘
@@ -169,47 +187,30 @@ When Phase 4 starts, each file goes through these steps:
     │  │ 1. Create folder if not exists:               │  │
     │  │    rclone mkdir gdrive:MEGA_Transfer/Folder   │  │
     │  │ 2. Upload file:                               │  │
-    │  │    rclone copy --progress <file> <gdrive:/>   │  │
-    │  │ Shows: % complete, speed (MB/s), ETA          │  │
+    │  │    rclone copy <file> <gdrive:/>              │  │
+    │  │ 3. Verify: no verify needed                   │  │
+    │  │    (Upload always succeeds or raises error)   │  │
     │  └───────────────────────────────────────────────┘  │
     └─────────────────────────┬───────────────────────────┘
                               │
                               ▼
     ┌─────────────────────────────────────────────────────┐
-    │  STEP F: VERIFY UPLOAD                              │
+    │  STEP F: SAVE STATE + GIT PUSH                      │
     │  ┌───────────────────────────────────────────────┐  │
-    │  │ rclone lsjson gdrive:.../<filename>           │  │
-    │  │                                                │  │
-    │  │ Check: filename EXACTLY match?                 │  │
-    │  │        file size EXACTLY match?                │  │
-    │  │ (Not a full GDrive scan - just 1 file check)   │  │
-    │  └──────────┬────────────────────┬───────────────┘  │
-    │             │ YES                │ NO               │
-    │             ▼                    ▼                  │
-    │  ┌──────────────────┐    ┌──────────────────────┐   │
-    │  │ Upload VERIFIED  │    │ Retry upload 1 time  │   │
-    │  │ ✅ Proceed       │    │ Still fail? → skip   │   │
-    │  └──────────────────┘    │ and continue         │   │
-    │                          └──────────────────────┘   │
-    └─────────────────────────────────────────────────────┘
-                              │ (only if verified OK)
-                              ▼
-    ┌─────────────────────────────────────────────────────┐
-    │  STEP G: SAVE TO ARTIFACT                           │
-    │  ┌───────────────────────────────────────────────┐  │
-    │  │ Append to completed_links.json:               │  │
-    │  │ - url, filename, size                         │  │
-    │  │ - target_folder, completed_at                 │  │
-    │  │ Save to disk immediately!!!                    │  │
-    │  │ (Per-file save = crash-proof design)          │  │
+    │  │ 1. Append to completed_links.json:            │  │
+    │  │    - url, filename, size                      │  │
+    │  │    - target_folder, completed_at              │  │
+    │  │ 2. git add + git commit + git push            │  │
+    │  │    (Per-file push = CRASH-PROOF)              │  │
+    │  │    Runner dies bhi → state already in repo!   │  │
     │  └───────────────────────────────────────────────┘  │
     └─────────────────────────┬───────────────────────────┘
                               │
                               ▼
     ┌─────────────────────────────────────────────────────┐
-    │  STEP H: CLEANUP & LOG                              │
+    │  STEP G: CLEANUP & LOG                              │
     │  ┌───────────────────────────────────────────────┐  │
-    │  │ 1. Delete: /tmp/mega_temp/<file>              │  │
+    │  │ 1. Delete: TEMP_DIR/*                         │  │
     │  │ 2. Print: "5/10 done | Quota: 3.4/5.0 GB"    │  │
     │  └───────────────────────────────────────────────┘  │
     └─────────────────────────┬───────────────────────────┘
@@ -225,8 +226,8 @@ When Phase 4 starts, each file goes through these steps:
 ```
         RUN 1                        RUN 2                        RUN 3                        RUN 4
   ┌──────────────────┐      ┌──────────────────┐      ┌──────────────────┐      ┌──────────────────┐
-  │ Artifact: empty  │      │ Artifact: 5 done │      │ Artifact:10 done │      │ Artifact:13 done │
-  │                  │      │                  │      │                  │      │                  │
+  │ State: empty     │      │ Git: 5 done      │      │ Git: 10 done    │      │ Git: 13 done    │
+  │                  │      │ (per-file push)  │      │ (per-file push) │      │ (per-file push) │
   │ Bollywood: 10   │      │ Bollywood: 10   │      │ Bollywood:10 ✅ │      │ Hollywood:5 ✅  │
   │ Hollywood: 5    │      │ Hollywood: 5    │      │ Hollywood:5 ▶️ │      │                  │
   │                  │      │                  │      │                  │      │                  │
@@ -235,13 +236,16 @@ When Phase 4 starts, each file goes through these steps:
   │                  │      │                  │      │                  │      │                  │
   │ Bollywood:5/10  │      │ Bollywood:10/10 │      │ Hollywood:3/5   │      │ Hollywood:5/5   │
   │ Hollywood: wait │      │ Hollywood: wait │      │                  │      │                  │
+  │                  │      │                  │      │  ⚡CRASH HERE?   │      │                  │
+  │                  │      │                  │      │  No problem!    │      │                  │
+  │                  │      │                  │      │  Git has 10/10  │      │                  │
   └──────────────────┘      └──────────────────┘      └──────────────────┘      └──────────────────┘
-                                                                                                      │
-                                                                                                      ▼
-                                                                                             ┌──────────────────┐
-                                                                                             │   ALL DONE !    │
-                                                                                             │  30/30 files    │
-                                                                                             └──────────────────┘
+                                                                                                       │
+                                                                                                       ▼
+                                                                                              ┌──────────────────┐
+                                                                                              │   ALL DONE !    │
+                                                                                              │  30/30 files    │
+                                                                                              └──────────────────┘
 ```
 ## Artifact System Explained
 
@@ -297,14 +301,17 @@ Run 3:  [Download artifact] → Read state → Process more → Upload (overwrit
 
 ### Crash-Proof Design
 
-Every successful file upload → **immediately saved to artifact** on disk:
+Every successful file upload → **immediately saved to artifact + git push**:
 
 ```
-Process File 1 → Save artifact ✅
-Process File 2 → Save artifact ✅
-Process File 3 → 💥 CRASH (VM dies)
-Next Run → Download artifact → Files 1,2 are already completed → Skip!
+Process File 1 → Save artifact ✅ + git push ✅ (state on GitHub)
+Process File 2 → Save artifact ✅ + git push ✅ (state on GitHub)
+Process File 3 → 💥 CRASH (VM dies, artifact upload never runs)
+Next Run → git pull → File 1,2 already in state → Skip!
              → Start from File 3 (not from beginning!)
+
+⚠️ Git push after EVERY file = TRUE crash-proof
+   Artifact at end is backup — git is the real source of truth
 ```
 
 ---
@@ -314,15 +321,17 @@ Next Run → Download artifact → Files 1,2 are already completed → Skip!
 | Feature | Description |
 |---------|-------------|
 | **Multi-folder** | JSON-based folder mapping. Each key = GDrive folder name. Auto-created via rclone mkdir. |
-| **Artifact state** | Per-file artifact save. Crash-proof — agli run wahi se resume karega. |
-| **No full GDrive scan** | Single-file 
-clone lsjson verification (1-2 sec per file vs 10-30 sec for full scan). |
+| **mega.py library** | Metadata fetch and download via Python library (more reliable than megadl CLI). |
+| **asyncio.coroutine fallback** | Python 3.12+ compatibility fix for mega.py dependency. |
+| **Per-file git push** | Har file upload ke baad turant `git commit + push`. Workflow crash ho tab bhi state safe. |
 | **Smart quota** | Har file se pehle metadata fetch → size check. Agar quota exceed hone wala ho → skip gracefully. |
 | **Oversized handling** | Files >5GB separated in oversized list. Manual handling ke liye alag category. |
 | **Folder auto-advance** | Ek folder complete → next pending folder automatically active. |
-| **Real-time logs** | Download/upload progress with %, speed, ETA in GitHub Actions logs. |
-| **Git backup** | Dual protection: Artifact + git commit. Agar artifact lost ho, git se restore. |
-| **Auto-trigger** | Files baki hain? → Next cycle automatically trigger via gh workflow run. |
+| **Real-time logs** | Download/upload progress with MB, timing in GitHub Actions logs. |
+| **Git backup** | Dual protection: Artifact + per-file git push. Har file ka record safe. |
+| **Auto-trigger** | Files baki hain? → Next cycle automatically trigger via gh workflow run (skip on cancellation). |
+| **Auto-stop** | Saare folders complete → no more cycles triggered. |
+| **Concurrency guard** | Only 1 run at a time — parallel runs prevented. |
 
 ---
 
@@ -424,7 +433,14 @@ token = {"access_token":"...","refresh_token":"..."}
 3. Click the **"Run workflow"** button
 4. Watch the logs in real-time
 
-The workflow will also run automatically via cron every 5 minutes.
+The workflow will NOT run automatically on a schedule. You must either:
+- Click **"Run workflow"** manually from the Actions tab, or
+- Let the **auto-trigger** start the next cycle when files remain after a run
+
+**Auto-trigger behavior:**
+- Runs only on `success()` or `failure()` — NOT on cancellation
+- Automatically stops when all folders are complete (`auto_trigger.py`)
+- Concurrency group ensures only 1 run at a time
 
 ---
 
@@ -530,58 +546,68 @@ File 4: size = 800MB → (Not checked, loop already broke)
 
 ### How It Works
 
-1. Script reads MEGA_LINKS JSON → discovers folders
-2. Each folder gets state: pending → ctive → completed
-3. First folder in JSON is auto-marked ctive
-4. When active folder's done == total:
-   - Mark folder completed
-   - Find next pending folder
-   - Mark it ctive
-   - Update current_folder in artifact
-5. If no pending folders remain → **ALL DONE!**
+1. Script reads MEGA_LINKS JSON → discovers folders from `{"folders": {}}` state
+2. Each folder gets state: `pending` → `active` → `completed`
+3. First folder in JSON is auto-marked `active`
+4. When active folder's `done >= total`:
+   - Mark folder `completed`
+   - Find next `pending` folder
+   - Mark it `active`
+   - Update `current_folder` in state
+5. If no pending folders remain → **ALL DONE!** → auto-trigger stops
+
+### State Propagation
+
+```
+MEGA_LINKS JSON (secret)             completed_links.json (state)
++-----------------------+             +----------------------------+
+| {                     |     --->    | "folders": {              |
+|   "Shorts": [45 URLs] |             |   "Shorts": {             |
+| }                     |             |     "total": 45,          |
++-----------------------+             |     "done": 16,           |
+                                      |     "status": "active"    |
+                                      |   }                       |
+                                      | }                          |
+                                      | "completed": [...]        |
+                                      | "current_folder": "Shorts"|
+                                      | "oversized": [...]        |
+                                      +----------------------------+
+```
 
 ### Visualization
 
 ```
-Initial:  Bollywood [pending]  Hollywood [pending]  WebSeries [pending]
-          ↓ (auto-activate first)
-Run 1-3:  Bollywood [▶️ active]   Hollywood [pending]   WebSeries [pending]
-          ↓ (Bollywood done)
-Run 4:    Bollywood [✅ done]     Hollywood [▶️ active]  WebSeries [pending]
-          ↓ (Hollywood done)
-Run 5:    Bollywood [✅ done]     Hollywood [✅ done]    WebSeries [▶️ active]
-          ↓ (WebSeries done)
-Final:    ALL DONE! 🎉
+Initial:  Shorts [pending]
+          | (auto-activate first)
+Run 1-3:  Shorts [>> active] --- 16/45 done (quota hit)
+          | (auto-trigger next run)
+Run 4-5:  Shorts [>> active] --- 32/45 done
+          |
+Run 6:    Shorts [>> active] --- 45/45 done
+          | (folder complete)
+Final:    Shorts [OK done] --- ALL DONE!
 ```
 
 ---
 
-## Verification Logic
 
-### How We Verify Uploads
+## Upload Strategy
 
-Instead of scanning the entire GDrive folder (slow), we verify **one file at a time**:
+### No Verification Needed
 
-`python
-rclone lsjson gdrive:MEGA_Transfer/Bollywood/Interstellar.mp4
+Previous versions used `rclone lsjson` to verify each upload. This was **removed** because:
+
+1. **Upload always succeeds or raises error** — rclone copy returns non-zero on failure
+2. **Timeouts caused crashes** — `rclone lsjson` could timeout (30s) and crash the script mid-batch
+3. **Per-file git push** provides the real crash-proofing — state saved to git before next file
+
+### What happens after upload:
+
 ```
-
-Returns:
-`json
-[{"Name": "Interstellar.mp4", "Size": 2454900000, ...}]
+rclone copy <local_file> gdrive:MEGA_Transfer/<folder>/
+if rclone returns 0 → upload succeeded → save state + git push
+if rclone returns non-zero → RuntimeError → skip to next file (TEMP_DIR cleaned)
 ```
-
-**We check two things:**
-1. **Filename** = Exact match
-2. **Size** = Exact match (bytes)
-
-**Both must match** → upload verified ✅
-
-### Why This Is Reliable
-
-- Two different files **cannot** have the same name + same size in the same folder
-- MEGA links provide unique filenames per link
-- No full GDrive scan needed (saves 10-30 sec per run)
 
 ---
 
@@ -683,16 +709,17 @@ Returns:
 | Problem | Cause | Solution |
 |---------|-------|----------|
 | MEGA_LINKS is not valid JSON | Secret is plain text, not JSON | Convert links to {"Folder":["url1","url2"]} format minified |
-| RCLONE_CONF secret is empty | Secret not set | Add RCLONE_CONF with output of 
-clone config show gdrive |
+| RCLONE_CONF secret is empty | Secret not set | Add RCLONE_CONF with output of `rclone config show gdrive` |
 | Artifact download warning in first run | No artifact exists yet | Normal! continue-on-error: true handles it |
 | Quota hit mid-download | MEGA bandwidth exhausted | Expected! Next run gets fresh quota |
-| File stuck in "pending" but already in GDrive | Artifact lost, URL not marked done | Check completed_links.json in git backup |
+| File stuck in "pending" but already in GDrive | State file corrupted/lost | Check completed_links.json in git — reset state if needed |
 | Upload fails with 403 | Token expired | rclone auto-refreshes token |
 | Folder not appearing in GDrive | Remote name wrong | Default remote is gdrive, must match rclone config |
-| Workflow keeps running after all done | No "all done" detection | Script outputs ::notice:: — check logs for "ALL DONE" |
+| Workflow cancels but new one starts | Auto-trigger ran on cancellation | Fixed! Now uses `if: success() || failure()` |
 | Files >5GB never get processed | MEGA quota limit per run | Download manually and upload via rclone |
-| State file corrupted/merge conflict | Git pull --rebase conflict in completed_links.json | Reset state using methods above |
+| State file corrupted/merge conflict | Git pull --rebase conflict in completed_links.json | Reset state using methods in "Resetting Completion List" section |
+| 422 error on workflow_dispatch | YAML parse error (inline Python broke YAML) | Fixed! Python code extracted to auto_trigger.py |
+| mega.py ImportError / asyncio.coroutine error | Python 3.12+ removed coroutine() | Fixed! Script adds fallback: `asyncio.coroutine = lambda c: c` |
 
 ---
 
@@ -702,10 +729,11 @@ clone config show gdrive |
 MEGA-TO-GDRIVE-GITHUB-CRON/
 ├── .github/
 │   └── workflows/
-│       └── mega_gdrive_transfer.yml    ← GitHub Actions workflow (cron schedule, artifact steps)
+│       └── mega_gdrive_transfer.yml    ← GitHub Actions workflow (manual + auto-trigger)
 ├── mega_to_gdrive.py                   ← Main transfer script (all logic)
-├── completed_links.json                ← Artifact state file (auto-generated, git-tracked)
-├── .gitignore                          ← Ignores mega_temp/ (downloads)
+├── auto_trigger.py                     ← Auto-trigger next cycle if files remain
+├── completed_links.json                ← State file (auto-generated, per-file git push)
+├── .gitignore                          ← Ignores TEMP_DIR (downloads)
 └── README.md                           ← This file
 ```
 
@@ -713,10 +741,11 @@ MEGA-TO-GDRIVE-GITHUB-CRON/
 
 | File | What It Does |
 |------|-------------|
-| mega_to_gdrive.py | Reads secrets, manages state, downloads from MEGA, uploads to GDrive via rclone, verifies, saves artifact |
-| mega_gdrive_transfer.yml | Defines GitHub Actions workflow: triggers via cron, handles artifacts, git backup, auto-trigger next cycle |
+| mega_to_gdrive.py | Reads secrets, manages state, downloads via mega.py, uploads to GDrive via rclone, per-file git push |
+| auto_trigger.py | Checks completed_links.json for remaining files; triggers next gh workflow run if needed |
+| mega_gdrive_transfer.yml | Defines GitHub Actions workflow: manual trigger, artifact steps, git backup, auto-trigger (skip on cancel) |
 | completed_links.json | Persistent state: tracks folders, completed files, current folder, oversized files |
-| .gitignore | Prevents mega_temp/ download directory from being committed to git |
+| .gitignore | Prevents TEMP_DIR/ download directory from being committed to git |
 
 ---
 
@@ -731,12 +760,14 @@ MEGA-TO-GDRIVE-GITHUB-CRON/
    │   │  WORKFLOW (mega_gdrive_transfer.yml)                 │   │
    │   │                                                     │   │
    │   │  1. Checkout repo                                   │   │
-   │   │  2. Install megatools + rclone + Python             │   │
-   │   │  3. Download artifact (completed_links.json)        │   │
+   │   │  2. Install megatools + mega.py + rclone            │   │
+   │   │  3. git pull + download artifact (state)            │   │
    │   │  4. Run mega_to_gdrive.py  <- main logic            │   │
-   │   │  5. Upload artifact (overwrite)                     │   │
-   │   │  6. Git commit + push (backup)                      │   │
-   │   │  7. Trigger next cycle (gh workflow run)            │   │
+   │   │     (per-file git push inside script!)              │   │
+   │   │  5. Upload artifact (overwrite - backup)            │   │
+   │   │  6. Git commit + push (final - may be no-op)       │   │
+   │   │  7. Auto-trigger (skip if cancelled)               │   │
+   │   │  8. Auto-stop if all folders done                  │   │
    │   └─────────────────────────────────────────────────────┘   │
    │                             │                                │
    │                             v                                │
@@ -747,14 +778,13 @@ MEGA-TO-GDRIVE-GITHUB-CRON/
    │   │         │                                            │   │
    │   │         v                                            │   │
    │   │  For each pending file:                             │   │
-   │   │    +-- Get metadata (megadl --info)                  │   │
+   │   │    +-- Get metadata (mega.py get_public_url_info)    │   │
    │   │    +-- Check oversized (>5GB?) -> skip if yes        │   │
    │   │    +-- Check quota (<=5GB?) -> skip if no            │   │
-   │   │    +-- Download (megadl --progress)                  │   │
-   │   │    +-- Upload (rclone copy --progress)               │   │
-   │   │    +-- Verify (rclone lsjson)                        │   │
-   │   │    +-- Save to artifact (per-file = crash-proof)     │   │
-   │   │    +-- Cleanup temp file                             │   │
+   │   │    +-- Download (mega.py download_url)               │   │
+   │   │    +-- Upload (rclone copy)                          │   │
+   │   │    +-- Save + git push (per-file = crash-proof!)    │   │
+   │   │    +-- Cleanup temp files                            │   │
    │   │         │                                            │   │
    │   │         v                                            │   │
    │   │  Folder done? -> Auto-advance to next                │   │
@@ -765,12 +795,12 @@ MEGA-TO-GDRIVE-GITHUB-CRON/
            │                   │                   │
            v                   v                   v
    +---------------+   +---------------+   +---------------+
-   |  MEGA CLOUD   |   | GDRIVE CLOUD  |   |GITHUB ARTIFACT|
-   |               |   |               |   |               |
-   |  Source of    |   |  Destination  |   |  State file   |
-   |  video files  |   |  MEGA_Transfer|   |  completed_   |
-   |  ~5GB quota   |   |  /{Folder}/   |   |  links.json   |
-   |  per IP/day   |   |               |   |  90 day keep  |
+   |  MEGA CLOUD   |   | GDRIVE CLOUD  |   |GITHUB REPO   |
+   |               |   |               |   |  + ARTIFACT  |
+   |  Source via   |   |  Destination  |   |               |
+   |  mega.py API  |   |  MEGA_Transfer|   |  State file   |
+   |  ~5GB quota   |   |  /{Folder}/   |   |  per-file     |
+   |  per IP/day   |   |               |   |  git push     |
     +---------------+   +---------------+   +---------------+
 ```
 ---

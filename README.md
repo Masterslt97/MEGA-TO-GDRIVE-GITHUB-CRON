@@ -1,268 +1,133 @@
 # MEGA to Google Drive Transfer
 
-Automatically transfer files from MEGA to Google Drive using GitHub Actions. Handles MEGA's bandwidth quota by auto-resuming after cooldown.
+Multi-folder file transfer from MEGA to Google Drive using GitHub Actions with artifact-based state tracking. Handles MEGA's 5GB bandwidth quota by auto-resuming across runs.
 
 ## How It Works
 
-```
-Cron triggers every 1 minute
+`
+GitHub Actions triggers every 5 min
         ↓
-Script loads state file → checks GDrive folder
+Download artifact (completed_links.json)
         ↓
-Skip already done files → Download pending from MEGA
+Read state → Find active folder → Filter pending links
         ↓
-Upload to GDrive via API → Save state → Git push
+For each file: metadata → quota check → download → upload → verify → save artifact
         ↓
-7 min window → EXIT → Cron triggers again
+Folder complete? → Auto-advance to next folder → Upload artifact
         ↓
-Repeat until ALL files transferred
-```
+Git backup commit + trigger next cycle
+`
 
 ## Features
 
 | Feature | Description |
 |---------|-------------|
-| 🟢 Download + Upload | File transferred to GDrive successfully |
-| 🟡 Skip | File already exists in GDrive (bandwidth saved!) |
-| 🔴 Failed | Transfer failed after retries |
-| ⚡ Speed bar | Live download speed (MB/s) with progress bar |
-| ⏱️ 7 min cycle | Runs 7 min, exits, cron restarts after 1 min |
-| 📁 GDrive scan | Checks GDrive folder via rclone lsf before download |
-| 📁 State persistence | Progress saved to repo via git, survives restarts |
-| 🔄 Token auto-refresh | Google Drive token refreshes automatically |
-| 🔁 403 retry | Auto-retries on rate limit with token refresh |
-| 📊 Live counters | Running total of downloaded/skipped/failed files |
+| Multi-folder | JSON-based folder mapping, auto-advance on completion |
+| Artifact state | Per-file artifact save (crash-proof, survives restarts) |
+| No GDrive scan | Single-file rclone lsjson verification (1-2 sec per file) |
+| Quota aware | Per-file size check before download, skip if >5GB remaining |
+| Oversized handling | Files >5GB separated for manual handling |
+| Real-time progress | Download/upload percentage, speed, ETA in logs |
+| Git backup | Dual protection: artifact + git commit |
 
-## Output Example
+## Setup
 
-```
-═══════════════════════════════════════════════════
-  🟢 MEGA -> Google Drive Transfer
-  Total: 208 | Pending: 180
-  ⏱️  Run for 7 min, then pause 1 min
-  🏁 Stop at: 15:01:59
-═══════════════════════════════════════════════════
+### Step 1: Fork/Clone this repo
 
-⬇️  [a8pA3SjC] downloading '41105_720.mp4' (176.2 MB)... [1/180]
-  📥 Downloading...
-  📤 Uploading to GDrive...
-  🔑 Refreshing token with client_id: 202264815644.apps...
-  ✅ Token refreshed successfully
-  ✅ Uploaded to GDrive: 41105_720.mp4 (ID: 1bNnmEb4TVO...)
-  ✅ [a8pA3SjC] '41105_720.mp4' (176.2 MB) — DONE
-  🟢 Done: 1  🟡 Skip: 0  🔴 Fail: 0
-  [████████████░░░░░░░░░░░░░░░░░░] ⚡ 27.3 MB/s  (1/208)
-```
+### Step 2: Add Secrets
 
-Skip (file already on GDrive):
-```
-⬇️  [utQT1DSJ] downloading '44573_720.mp4' (305.4 MB)... [2/180]
-🟡 [utQT1DSJ] '44573_720.mp4' — skip (already in Drive)
-  🟢 Done: 1  🟡 Skip: 1  🔴 Fail: 0
-```
+**Settings → Secrets and variables → Actions → New repository secret**
 
-Quota hit:
-```
-🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴
-🔴                                      🔴
-🔴   QUOTA OVER 🚫 BANDWIDTH LIMIT      🔴
-🔴   Wait 1 min — Cron auto-resumes!    🔴
-🔴                                      🔴
-🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴
-```
+#### Secret 1: MEGA_LINKS (JSON format)
 
-All done:
-```
-🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢
-🟢   HURRY 🎉 208 FILES TRANSFERRED     🟢
-🟢   TO GDRIVE! WAh 🎉                  🟢
-🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢
-```
+Single-line minified JSON:
+`json
+{"FolderName1":["https://mega.nz/file/abc#key","https://mega.nz/file/def#key"],"FolderName2":["https://mega.nz/file/ghi#key"]}
+`
 
-## Features
+Each key = GDrive folder name (auto-created), value = array of MEGA file links.
 
-| Feature | Description |
-|---------|-------------|
-| 🟢 Download + Upload | File transferred to GDrive successfully |
-| 🟡 Skip | File already exists in GDrive (bandwidth saved!) |
-| 🔴 Failed | Transfer failed after retries |
-| ⚡ Speed bar | Live download speed (MB/s) with progress |
-| ⏱️ 7 min cycle | Runs 7 min, exits, cron restarts after 1 min |
-| 📁 State persistence | Progress saved to repo via git, survives restarts |
-| 🔄 Token auto-refresh | Google Drive token refreshes via refresh_token |
-| 🔍 GDrive scan | Checks GDrive folder before downloading |
-| 🔁 403 retry | Auto-retries on rate limit with token refresh |
+#### Secret 2: RCLONE_CONF
 
-## Setup (5 minutes)
-
-### Step 1: Create GitHub Repo
-
-1. Go to [github.com/new](https://github.com/new)
-2. Name: `mega-to-gdrive` (or anything)
-3. Click **Create repository**
-
-### Step 2: Upload Files
-
-Upload these files:
-```
-mega_to_gdrive.py              ← root
-mega_transfer_state.json       ← root (contents: {})
-.github/workflows/
-  mega_gdrive_transfer.yml     ← inside .github/workflows/
-.gitignore                     ← root (contents: mega_temp/)
-```
-
-### Step 3: Add Secrets
-
-Go to: **Settings → Secrets and variables → Actions → New repository secret**
-
-#### Secret 1: `MEGA_LINKS`
-```
-https://mega.nz/file/abc123#xyz
-https://mega.nz/file/def456#uvw
-https://mega.nz/file/ghi789#rst
-```
-(One link per line)
-
-#### Secret 2: `RCLONE_CONF`
-
-Get your rclone config:
-```bash
+`ash
 rclone config show gdrive
-```
+`
 
-Output looks like:
-```
-[gdrive]
-type = drive
-client_id = xxxxxx
-client_secret = xxxxxx
-scope = drive
-token = {"access_token":"xxxxx","refresh_token":"xxxxx"}
-```
+Copy entire output and paste as secret value.
 
-Copy the **entire output** and paste as `RCLONE_CONF` secret.
-
-### Step 4: Run
+### Step 3: Run
 
 1. Go to **Actions** tab
 2. Click **"MEGA to Google Drive Transfer"**
 3. Click **"Run workflow"**
-4. Done!
+4. Check real-time logs
 
-## How Skip Check Works (3 Levels)
+## State File (Artifact)
 
-1. **State file** — If `mega_transfer_state.json` has `status: completed` → skip
-2. **GDrive scan** — `rclone lsf` lists GDrive folder, checks filename → skip
-3. **MEGA metadata** — If filename from MEGA matches GDrive → skip + save state
+`
+completed_links.json (auto-managed)
+  ├── folders: {name, total, done, status}
+  ├── completed: [{url, filename, size, target_folder, completed_at}]
+  ├── current_folder: active folder name
+  └── oversized: [{url, filename, size, target_folder}]
+`
 
-This ensures no file is downloaded twice, even if state file was lost.
+Har file ke baad artifact update hota hai — agar run beech mein crash ho, agli run wahi se resume karega.
 
-## How Upload Works
+## Example Log Output
 
-Uses **Google Drive API** directly (not rclone copy):
-1. Gets fresh access token via `refresh_token` from rclone config
-2. Creates/finds `MEGA_Transfer` folder on GDrive
-3. Resumable upload via API
-4. Returns file ID on success
-5. Auto-retries on 403 with token refresh
+`
+  MEGA -> GDrive Transfer | 2025-01-15 10:30:00
+  Artifact loaded: 5 completed files
+  Total pending: 25
+  [ACTIVE] Bollywood: 2/10
+  [WAIT] Hollywood: 0/8
+  [WAIT] Web Series: 0/7
+  --- [1/10] Bollywood ---
+  Fetching: https://mega.nz/file/abc...
+  [Bollywood] "Interstellar.mp4" | Size: 2.3 GB
+  DOWNLOADING: "Interstellar.mp4"...
+  Downloaded: 2.3 GB
+  UPLOADING to GDrive/MEGA_Transfer/Bollywood/...
+  Uploaded: "Interstellar.mp4"
+  VERIFIED: "Interstellar.mp4" (2.3 GB)
+  Artifact saved: 3/10 done
+  [1/10] Complete | Quota: 2.3/5.0 GB
+`
 
-## How Cycle Works
+## Quota & Cycle
 
-```
-Cron triggers every 1 minute
-        ↓
-Script loads state + scans GDrive
-        ↓
-Skip done files → Download pending → Upload → Save state
-        ↓
-7 min timer starts
-        ↓
-Time up? → EXIT
-        ↓
-Cron triggers again → Resume from state
-        ↓
-Repeat until ALL DONE
-```
+| Aspect | Behavior |
+|--------|----------|
+| Quota per run | ~5 GB (new VM = new IP = fresh quota) |
+| Cron schedule | */5 * * * * (every 5 minutes) |
+| File skip logic | Before download: size check. If quota full → skip for this run |
+| Oversized | Files >5GB marked in artifact, skipped automatically |
+| Folder advance | One folder done → next pending folder auto-activates |
+| Completion | All folders done → workflow stops triggering |
 
-## Rclone Config Setup (First Time)
+## Files
 
-If you don't have rclone configured yet:
-
-```bash
-# Install rclone
-curl -s https://rclone.org/install.sh | sudo bash
-
-# Setup
-rclone config
-```
-
-Follow the prompts:
-```
-n) New remote
-name> gdrive
-Storage> drive
-client_id> (press Enter)
-client_secret> (press Enter)
-scope> 1
-root_folder_id> (press Enter)
-service_account_file> (press Enter)
-Edit advanced config? n
-Use auto config? y
-Configure as team drive? n
-Yes this is OK
-q) Quit
-```
-
-Then get config:
-```bash
-rclone config show gdrive
-```
-
-Copy output → paste as `RCLONE_CONF` secret.
+`
+MEGA-TO-GDRIVE-GITHUB-CRON/
+├── .github/workflows/
+│   └── mega_gdrive_transfer.yml    ← GitHub Actions workflow
+├── mega_to_gdrive.py               ← Main transfer script
+├── completed_links.json            ← Artifact state file (auto-managed)
+├── .gitignore                      ← Ignores mega_temp/
+└── README.md                       ← This file
+`
 
 ## Troubleshooting
 
 | Problem | Solution |
 |---------|----------|
-| `RCLONE_CONF empty` | Secret name must be exactly `RCLONE_CONF` |
-| `No valid MEGA links` | Links must be one per line in `MEGA_LINKS` secret |
-| `401 Unauthorized` | Token expired — auto-refreshes now |
-| `403 Forbidden` | Rate limit — script retries with backoff (10s/20s) |
-| `VERIFY FAILED` | File not on remote after upload |
-| Quota error | Normal! Script exits, resumes in 1 min |
-| `None` file names | Metadata fetch failed, still downloads correctly |
-| Files not in GDrive | Check `RCLONE_CONF` has valid refresh_token |
-| Same file uploaded twice | Check scan_drive returns files, duplicates cleaned |
-| Runs cancelled | Remove concurrency lock from workflow |
-
-## Files
-
-```
-mega-to-gdrive/
-├── .github/workflows/
-│   └── mega_gdrive_transfer.yml    ← GitHub Actions workflow
-├── mega_to_gdrive.py               ← Main transfer script
-├── mega_transfer_state.json        ← Progress tracker (auto-updated)
-├── cleanup_duplicates.py           ← One-time cleanup script
-├── check_duplicates.py             ← Check for duplicate files
-├── .gitignore                      ← Ignores mega_temp/
-└── README.md                       ← This file
-```
-
-## How Token Refresh Works
-
-```
-rclone config → has refresh_token
-        ↓
-Script calls googleapis.com/token
-        ↓
-Gets new access_token (expires in 1 hour)
-        ↓
-Uses for API calls
-        ↓
-On 401/403 → refresh again → retry
-```
+| JSON parse error | MEGA_LINKS must be valid JSON, not plain text |
+| Artifact not found | First run? Normal. continue-on-error handles it |
+| Quota exceeded | Expected! Next run gets fresh 5GB quota |
+| Upload failed | Check RCLONE_CONF is valid |
+| Folder not created | rclone mkdir auto-creates — check remote name is "gdrive" |
+| Duplicate uploads | Artifact tracks completed URLs — check completed_links.json |
 
 ## License
 

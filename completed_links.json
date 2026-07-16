@@ -1,1 +1,12 @@
-{"folders": {}, "completed": [], "current_folder": null, "oversized": []}
+{
+  "folders": {
+    "Shorts": {
+      "total": 45,
+      "done": 0,
+      "status": "active"
+    }
+  },
+  "completed": [],
+  "current_folder": "Shorts",
+  "oversized": []
+}

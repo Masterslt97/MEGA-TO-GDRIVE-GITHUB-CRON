@@ -7,7 +7,7 @@
     },
     "Beautiful Girls": {
       "total": 208,
-      "done": 15,
+      "done": 16,
       "status": "active"
     }
   },
@@ -432,6 +432,13 @@
       "size": 301433967,
       "target_folder": "Beautiful Girls",
       "completed_at": "2026-07-16T23:28:02Z"
+    },
+    {
+      "url": "https://mega.nz/file/bHZGVIoS#6pxIG0T0jAFHHHEvSQ2a201wNTXDT57vlhHBaTKEuOc",
+      "filename": "1466052_720.mp4",
+      "size": 298659677,
+      "target_folder": "Beautiful Girls",
+      "completed_at": "2026-07-16T23:28:49Z"
     }
   ],
   "oversized": []

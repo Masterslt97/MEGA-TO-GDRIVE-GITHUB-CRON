@@ -2,8 +2,7 @@
   "folders": {
     "Shorts": {
       "total": 45,
-<<<<<<< Updated upstream
-      "done": 1,
+      "done": 2,
       "status": "active"
     }
   },
@@ -13,16 +12,16 @@
       "filename": "18061_720p.mp4",
       "size": 95400728,
       "target_folder": "Shorts",
-      "completed_at": "2026-07-16T16:04:32Z"
+      "completed_at": "2026-07-16T16:06:31Z"
+    },
+    {
+      "url": "https://mega.nz/file/6hgRUAgD#_K-DtImws7HhK6W2MhMvzhi-sghWp-1JznD2HAj12rc",
+      "filename": "671286954558.mp4",
+      "size": 80972191,
+      "target_folder": "Shorts",
+      "completed_at": "2026-07-16T16:06:49Z"
     }
   ],
-=======
-      "done": 0,
-      "status": "active"
-    }
-  },
-  "completed": [],
->>>>>>> Stashed changes
   "current_folder": "Shorts",
   "oversized": []
 }

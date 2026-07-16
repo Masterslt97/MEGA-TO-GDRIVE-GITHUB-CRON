@@ -2,7 +2,7 @@
   "folders": {
     "Shorts": {
       "total": 45,
-      "done": 6,
+      "done": 7,
       "status": "active"
     },
     "Beautiful Girls": {
@@ -54,6 +54,13 @@
       "size": 606715887,
       "target_folder": "Shorts",
       "completed_at": "2026-07-16T17:48:54Z"
+    },
+    {
+      "url": "https://mega.nz/file/75gBSRBS#ze8x7il0kDd69itj3a6oFSbkNfvLFsdu8xyrFlawdPk",
+      "filename": "725492501209.mp4",
+      "size": 148025416,
+      "target_folder": "Shorts",
+      "completed_at": "2026-07-16T17:49:37Z"
     }
   ]
 }

@@ -134,14 +134,11 @@ def ensure_gdrive_folder(folder_name):
 def upload_file(filepath, folder_name):
     target = f"{GDRIVE_REMOTE}:{BASE_FOLDER}/{folder_name}/"
     r = subprocess.run(
-        ["rclone", "copy", "--progress", filepath, target],
+        ["rclone", "copy", filepath, target],
         capture_output=True, text=True, timeout=3600
     )
-    if r.stdout:
-        for line in r.stdout.strip().splitlines():
-            log(f"  {line}")
     if r.returncode != 0:
-        raise RuntimeError((r.stdout + r.stderr).strip() or f"rclone copy exit {r.returncode}")
+        raise RuntimeError((r.stderr or r.stdout).strip()[:300] or f"rclone copy exit {r.returncode}")
     return os.path.basename(filepath)
 
 
@@ -305,12 +302,14 @@ def main():
             log(f"  (metadata unavailable — downloading directly)")
 
         # Download
-        log(f"  DOWNLOADING: \"{filename or '?'}\"...")
+        dl_start = time.time()
+        log(f"  DOWNLOADING: \"{filename or '?'}\" ({fmt_size(file_size or 0)})...")
         try:
             local_path = download_file(url)
             actual_size = os.path.getsize(local_path)
             actual_name = os.path.basename(local_path)
-            log(f"  Downloaded: {fmt_size(actual_size)}")
+            dl_elapsed = time.time() - dl_start
+            log(f"  Downloaded: {fmt_size(actual_size)} in {dl_elapsed:.0f}s")
         except RuntimeError as e:
             msg = str(e)
             if is_quota(msg):
@@ -343,11 +342,13 @@ def main():
         quota_used += file_size
 
         # Upload
-        log(f"  UPLOADING to GDrive/{BASE_FOLDER}/{active_folder}/...")
+        ul_start = time.time()
+        log(f"  UPLOADING: \"{filename}\" ({fmt_size(file_size)}) to GDrive/{BASE_FOLDER}/{active_folder}/...")
         ensure_gdrive_folder(active_folder)
         try:
             uploaded_name = upload_file(local_path, active_folder)
-            log(f"  Uploaded: \"{uploaded_name}\"")
+            ul_elapsed = time.time() - ul_start
+            log(f"  Uploaded: \"{uploaded_name}\" ({fmt_size(file_size)} in {ul_elapsed:.0f}s)")
         except RuntimeError as e:
             log(f"  Upload failed: {str(e)[:200]}")
             shutil.rmtree(TEMP_DIR, ignore_errors=True)

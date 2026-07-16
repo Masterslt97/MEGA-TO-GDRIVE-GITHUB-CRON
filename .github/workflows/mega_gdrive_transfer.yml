@@ -73,20 +73,6 @@ jobs:
         if: always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          python -c "
-import json
-try:
-    d = json.load(open('completed_links.json'))
-except Exception:
-    d = {'folders':{}}
-rem = sum(f['total']-f['done'] for f in d.get('folders',{}).values() if f.get('status')!='completed')
-if rem > 0:
-    import subprocess
-    r = subprocess.run(['gh','workflow','run','MEGA to Google Drive Transfer','--ref','main'], capture_output=True, text=True)
-    print(f'Triggered next cycle (exit={r.returncode})' if r.returncode==0 else f'Trigger failed: {r.stderr.strip()}')
-else:
-    print('All done, no more cycles')
-"
+        run: python auto_trigger.py
 
 

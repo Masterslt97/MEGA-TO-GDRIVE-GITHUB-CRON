@@ -2,8 +2,7 @@ name: MEGA to Google Drive Transfer
 
 on:
   schedule:
-    - cron: '* * * * *'
-
+    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 permissions:
@@ -13,7 +12,7 @@ permissions:
 jobs:
   transfer:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 15
 
     steps:
       - name: Checkout repo
@@ -37,15 +36,27 @@ jobs:
       - name: Install rclone
         run: curl -s https://rclone.org/install.sh | sudo bash
 
+      - name: Download artifact (completed list)
+        uses: actions/download-artifact@v4
+        with:
+          name: completed-links
+        continue-on-error: true
+
       - name: Run transfer
         env:
           MEGA_LINKS: ${{ secrets.MEGA_LINKS }}
           RCLONE_CONF: ${{ secrets.RCLONE_CONF }}
-          GDRIVE_REMOTE: ${{ secrets.GDRIVE_REMOTE }}
-          GDRIVE_FOLDER: ${{ secrets.GDRIVE_FOLDER }}
         run: python mega_to_gdrive.py
 
-      - name: Save state to repo
+      - name: Upload artifact (completed list)
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: completed-links
+          path: completed_links.json
+          retention-days: 90
+
+      - name: Save state to repo (backup)
         if: always()
         run: |
           git config user.name "github-actions[bot]"
@@ -53,7 +64,7 @@ jobs:
           git stash || true
           git pull --rebase origin main || true
           git stash pop || true
-          git add mega_transfer_state.json
+          git add completed_links.json
           git diff --staged --quiet || git commit -m "update state [skip ci]" && git push
 
       - name: Trigger next cycle

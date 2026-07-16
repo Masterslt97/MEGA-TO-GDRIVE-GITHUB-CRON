@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MEGA to Google Drive transfer. 7 min run → 1 min off → repeat."""
+"""MEGA to Google Drive multi-folder transfer with artifact-based state tracking."""
 
 import json
 import os
@@ -8,74 +8,64 @@ import shutil
 import subprocess
 import sys
 import time
-import hashlib
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 
 MEGA_LINKS_RAW = os.environ.get("MEGA_LINKS", "")
-RCLONE_CONF = os.environ.get("RCLONE_CONF", "")
-GDRIVE_REMOTE = os.environ.get("GDRIVE_REMOTE", "") or "gdrive"
-GDRIVE_FOLDER = os.environ.get("GDRIVE_FOLDER", "") or "MEGA_Transfer"
-
-WORKSPACE = os.environ.get("GITHUB_WORKSPACE", os.getcwd())
-STATE_FILE = os.path.join(WORKSPACE, "mega_transfer_state.json")
-TEMP_DIR = os.path.join(WORKSPACE, "mega_temp")
-MAX_RETRIES = 3
-RUN_SECONDS = 420  # 7 minutes
+RCLONE_CONF_RAW = os.environ.get("RCLONE_CONF", "")
+GDRIVE_REMOTE = "gdrive"
+BASE_FOLDER = "MEGA_Transfer"
+QUOTA_MAX = 5 * 1024 * 1024 * 1024
 QUOTA_MARKERS = ["over quota", "bandwidth limit", "quota exceeded", "429", "eoverquota"]
 
-stats = {"downloaded": 0, "skipped": 0, "failed": 0}
-total_bytes_downloaded = 0
-speed_start_time = time.time()
-speed_start_bytes = 0
+WORKSPACE = os.environ.get("GITHUB_WORKSPACE", os.getcwd())
+COMPLETED_FILE = os.path.join(WORKSPACE, "completed_links.json")
+TEMP_DIR = os.path.join(WORKSPACE, "mega_temp")
+MAX_RETRIES = 3
 
 
-def link_id(url):
-    m = re.search(r"/file/([^#]+)", url)
-    return m.group(1)[:8] if m else hashlib.md5(url.encode()).hexdigest()[:8]
+def fmt_size(b):
+    if b is None:
+        return "unknown"
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if b < 1024:
+            return f"{b:.1f} {unit}"
+        b /= 1024
+    return f"{b:.1f} PB"
 
 
 def is_quota(text):
     return any(m in text.lower() for m in QUOTA_MARKERS)
 
 
-def fmt_size(b):
-    if b is None:
-        return "unknown"
-    if b >= 1024 * 1024:
-        return f"{b / (1024 * 1024):.1f} MB"
-    elif b >= 1024:
-        return f"{b / 1024:.1f} KB"
-    return f"{b} B"
+def log(msg):
+    print(msg, flush=True)
 
 
-def get_speed():
-    elapsed = time.time() - speed_start_time
-    if elapsed < 1:
-        return "0 B/s"
-    speed = (total_bytes_downloaded - speed_start_bytes) / elapsed
-    if speed >= 1024 * 1024:
-        return f"{speed / (1024 * 1024):.1f} MB/s"
-    elif speed >= 1024:
-        return f"{speed / 1024:.1f} KB/s"
-    return f"{speed:.0f} B/s"
+def timestamp():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def load_state():
-    if os.path.exists(STATE_FILE):
+def load_completed():
+    if os.path.exists(COMPLETED_FILE):
         try:
-            return json.load(open(STATE_FILE))
-        except Exception:
+            with open(COMPLETED_FILE) as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
             pass
-    return {}
+    return {"folders": {}, "completed": [], "current_folder": None, "oversized": []}
 
 
-def save_state(state):
-    json.dump(state, open(STATE_FILE, "w"), indent=2)
+def save_completed(state):
+    with open(COMPLETED_FILE, "w") as f:
+        json.dump(state, f, indent=2)
 
 
-def get_metadata(url):
+def get_file_info(url):
     try:
-        r = subprocess.run(["megadl", "--info", url], capture_output=True, text=True, timeout=30)
+        r = subprocess.run(
+            ["megadl", "--info", url],
+            capture_output=True, text=True, timeout=30
+        )
         out = r.stdout.strip()
         name = re.search(r"File:\s+(.+?)\s+\(", out)
         size = re.search(r"\((\d+)\s*bytes?\)", out)
@@ -86,380 +76,324 @@ def get_metadata(url):
     return None, None
 
 
-def scan_drive():
-    """List files in GDrive folder via rclone lsf. Returns {filename: 0}."""
-    existing = {}
-    try:
-        # Ensure token is fresh before listing
-        get_gdrive_token()
-        subprocess.run(["rclone", "mkdir", f"{GDRIVE_REMOTE}:{GDRIVE_FOLDER}"],
-                        capture_output=True, text=True, timeout=30)
-        r = subprocess.run(
-            ["rclone", "lsf", f"{GDRIVE_REMOTE}:{GDRIVE_FOLDER}",
-             "--max-depth", "1"],
-            capture_output=True, text=True, timeout=120
-        )
-        if r.returncode != 0:
-            print(f"  WARN: rclone lsf failed (rc={r.returncode}): {r.stderr[:300]}", flush=True)
-        for line in r.stdout.strip().splitlines():
-            fname = line.strip().rstrip("/")
-            if fname:
-                existing[fname] = 0
-    except Exception as e:
-        print(f"  WARN: scan_drive failed ({e})", flush=True)
-    return existing
-
-
-def download(url):
-    global total_bytes_downloaded
+def download_file(url):
     if os.path.isdir(TEMP_DIR):
         shutil.rmtree(TEMP_DIR)
     os.makedirs(TEMP_DIR, exist_ok=True)
-    r = subprocess.run(["megadl", "--path", TEMP_DIR, url], capture_output=True, text=True, timeout=3600)
+    r = subprocess.run(
+        ["megadl", "--progress", "--path", TEMP_DIR, url],
+        capture_output=True, text=True, timeout=3600
+    )
+    if r.stdout:
+        for line in r.stdout.strip().splitlines():
+            log(f"  {line}")
     if r.returncode != 0:
         raise RuntimeError((r.stdout + r.stderr).strip() or f"megadl exit {r.returncode}")
     files = [f for f in os.listdir(TEMP_DIR) if os.path.isfile(os.path.join(TEMP_DIR, f))]
     if not files:
         raise RuntimeError("No file downloaded")
-    fpath = os.path.join(TEMP_DIR, files[0])
-    total_bytes_downloaded += os.path.getsize(fpath)
-    return fpath
+    return os.path.join(TEMP_DIR, files[0])
 
 
-def get_gdrive_token():
-    """Get fresh access token using refresh_token from rclone config."""
-    import json as _json
-    import urllib.request, urllib.parse
+def ensure_gdrive_folder(folder_name):
+    target = f"{GDRIVE_REMOTE}:{BASE_FOLDER}/{folder_name}"
+    r = subprocess.run(
+        ["rclone", "mkdir", target],
+        capture_output=True, text=True, timeout=30
+    )
+    if r.returncode != 0:
+        log(f"  warning: rclone mkdir stderr: {r.stderr[:200]}")
 
-    # Get token data from rclone config
-    r = subprocess.run(["rclone", "config", "show", GDRIVE_REMOTE],
-                        capture_output=True, text=True, timeout=10)
-    print(f"  📋 rclone config output:", flush=True)
-    for line in r.stdout.strip().splitlines():
-        # Mask token but show key fields
-        if "token" in line.lower():
-            print(f"     [token field present]", flush=True)
-        else:
-            print(f"     {line}", flush=True)
 
-    refresh_token = ""
-    client_id = ""
-    client_secret = ""
+def upload_file(filepath, folder_name):
+    target = f"{GDRIVE_REMOTE}:{BASE_FOLDER}/{folder_name}/"
+    r = subprocess.run(
+        ["rclone", "copy", "--progress", filepath, target],
+        capture_output=True, text=True, timeout=3600
+    )
+    if r.stdout:
+        for line in r.stdout.strip().splitlines():
+            log(f"  {line}")
+    if r.returncode != 0:
+        raise RuntimeError((r.stdout + r.stderr).strip() or f"rclone copy exit {r.returncode}")
+    return os.path.basename(filepath)
 
-    for line in r.stdout.splitlines():
-        line = line.strip()
-        if line.startswith("token") and "refresh_token" in line:
-            token_str = line.split("=", 1)[1].strip()
-            token_data = _json.loads(token_str)
-            refresh_token = token_data.get("refresh_token", "")
-        elif line.startswith("client_id"):
-            client_id = line.split("=", 1)[1].strip()
-        elif line.startswith("client_secret"):
-            client_secret = line.split("=", 1)[1].strip()
 
-    if not refresh_token:
-        raise RuntimeError("No refresh_token found in rclone config")
-
-    # Use rclone's built-in client_id if none specified
-    if not client_id:
-        client_id = "202264815644.apps.googleusercontent.com"
-        client_secret = "X4Z3ca8xfWDb1Voo-F9a7ZxJ"
-
-    # Refresh the token
-    data = urllib.parse.urlencode({
-        "client_id": client_id,
-        "client_secret": client_secret,
-        "refresh_token": refresh_token,
-        "grant_type": "refresh_token"
-    }).encode()
-
-    print(f"  🔑 Refreshing token with client_id: {client_id[:20]}...", flush=True)
+def verify_upload(filename, file_size, folder_name):
+    target = f"{GDRIVE_REMOTE}:{BASE_FOLDER}/{folder_name}/{filename}"
+    r = subprocess.run(
+        ["rclone", "lsjson", target],
+        capture_output=True, text=True, timeout=30
+    )
+    if r.returncode != 0 or not r.stdout.strip():
+        return False
     try:
-        req = urllib.request.Request("https://oauth2.googleapis.com/token", data=data)
-        resp = urllib.request.urlopen(req, timeout=30)
-        result = _json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        body = e.read().decode()
-        raise RuntimeError(f"Token refresh HTTP {e.code}: {body[:300]}")
-
-    access_token = result.get("access_token")
-    if not access_token:
-        raise RuntimeError(f"Token refresh failed: {result}")
-
-    print(f"  ✅ Token refreshed successfully", flush=True)
-    return access_token
-
-
-def get_or_create_folder(parent_id, folder_name, token):
-    """Find or create a folder in Google Drive. Returns folder ID."""
-    import json as _json
-    import urllib.request, urllib.parse
-
-    for attempt in range(3):
-        try:
-            # Search for folder
-            query = f"name='{folder_name}' and '{parent_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
-            url = f"https://www.googleapis.com/drive/v3/files?q={urllib.parse.quote(query)}&fields=files(id,name)"
-            req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
-            resp = urllib.request.urlopen(req, timeout=30)
-            data = _json.loads(resp.read())
-
-            if data.get("files"):
-                return data["files"][0]["id"]
-
-            # Create folder
-            body = _json.dumps({
-                "name": folder_name,
-                "mimeType": "application/vnd.google-apps.folder",
-                "parents": [parent_id]
-            }).encode()
-            req = urllib.request.Request("https://www.googleapis.com/drive/v3/files",
-                                         data=body,
-                                         headers={"Authorization": f"Bearer {token}",
-                                                  "Content-Type": "application/json"})
-            resp = urllib.request.urlopen(req, timeout=30)
-            return _json.loads(resp.read())["id"]
-
-        except urllib.error.HTTPError as e:
-            if e.code == 403 and attempt < 2:
-                wait = 10 * (attempt + 1)
-                print(f"  ⚠️ Folder API 403 (attempt {attempt+1}/3), waiting {wait}s...", flush=True)
-                time.sleep(wait)
-                token = get_gdrive_token()
-                continue
-            raise
-
-
-def upload(local):
-    import json as _json
-    import urllib.request
-
-    fname = os.path.basename(local)
-    local_size = os.path.getsize(local)
-
-    # Get token
-    token = get_gdrive_token()
-    if not token:
-        raise RuntimeError("Could not get Google Drive access token from rclone config")
-
-    # Get/create folder
-    folder_id = get_or_create_folder("root", GDRIVE_FOLDER, token)
-
-    # Upload file via resumable upload with retry
-    for upload_attempt in range(1, 4):
-        try:
-            metadata = _json.dumps({"name": fname, "parents": [folder_id]}).encode()
-
-            # Initiate resumable upload
-            req = urllib.request.Request(
-                "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable",
-                data=metadata,
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": "application/json; charset=UTF-8",
-                    "X-Upload-Content-Type": "video/mp4",
-                    "X-Upload-Content-Length": str(local_size)
-                }
-            )
-            resp = urllib.request.urlopen(req, timeout=30)
-            upload_url = resp.headers.get("Location")
-
-            if not upload_url:
-                raise RuntimeError("Failed to initiate resumable upload")
-
-            # Upload content
-            with open(local, "rb") as f:
-                data = f.read()
-            req = urllib.request.Request(upload_url, data=data, method="PUT",
-                                         headers={"Content-Length": str(local_size),
-                                                  "Content-Type": "video/mp4"})
-            resp = urllib.request.urlopen(req, timeout=3600)
-            result = _json.loads(resp.read())
-
-            if not result.get("id"):
-                raise RuntimeError(f"Upload failed: {result}")
-
-            print(f"  ✅ Uploaded to GDrive: {fname} (ID: {result['id']})", flush=True)
-            return fname
-
-        except urllib.error.HTTPError as e:
-            if e.code == 403 and upload_attempt < 3:
-                wait = 10 * upload_attempt
-                print(f"  ⚠️ 403 Forbidden (attempt {upload_attempt}/3), waiting {wait}s...", flush=True)
-                time.sleep(wait)
-                token = get_gdrive_token()
-                continue
-            raise RuntimeError(f"Upload HTTP {e.code}: {e.read().decode()[:200]}")
-
-    raise RuntimeError("Upload failed after 3 attempts")
-
-
-def show_status(current, total):
-    bar_len = 30
-    speed = get_speed()
-    # Speed-based bar: 0 MB/s = empty, 50+ MB/s = full
-    speed_mbps = 0
-    elapsed = time.time() - speed_start_time
-    if elapsed >= 1:
-        speed_mbps = (total_bytes_downloaded - speed_start_bytes) / elapsed / (1024 * 1024)
-    speed_pct = min(speed_mbps / 50.0, 1.0)  # 50 MB/s = 100%
-    filled = int(bar_len * speed_pct)
-    bar = "█" * filled + "░" * (bar_len - filled)
-    print(f"  🟢 Done: {stats['downloaded']}  🟡 Skip: {stats['skipped']}  🔴 Fail: {stats['failed']}", flush=True)
-    print(f"  [{bar}] ⚡ {speed}  ({current}/{total})", flush=True)
+        files = json.loads(r.stdout)
+        for f in files:
+            if f.get("Name") == filename and f.get("Size") == file_size:
+                return True
+    except (json.JSONDecodeError, KeyError):
+        pass
+    return False
 
 
 def main():
-    global total_bytes_downloaded, speed_start_time, speed_start_bytes
-
-    links = [l.strip() for l in MEGA_LINKS_RAW.splitlines() if l.strip()]
-    valid = [l for l in links if "mega.nz/file/" in l]
-    if not valid:
-        print("🔴 ERROR: No valid MEGA links."); sys.exit(1)
-
-    conf_path = os.path.expanduser("~/.config/rclone/rclone.conf")
-    os.makedirs(os.path.dirname(conf_path), exist_ok=True)
+    # Setup rclone config
+    conf_dir = os.path.expanduser("~/.config/rclone")
+    conf_path = os.path.join(conf_dir, "rclone.conf")
+    os.makedirs(conf_dir, exist_ok=True)
     if not os.path.exists(conf_path):
-        if not RCLONE_CONF:
-            print("🔴 ERROR: RCLONE_CONF empty."); sys.exit(1)
-        open(conf_path, "w").write(RCLONE_CONF)
+        if not RCLONE_CONF_RAW:
+            log("ERROR: RCLONE_CONF secret is empty")
+            sys.exit(1)
+        with open(conf_path, "w") as f:
+            f.write(RCLONE_CONF_RAW)
+        log("  rclone.conf written")
 
-    os.makedirs(TEMP_DIR, exist_ok=True)
-    state = load_state()
-    drive = scan_drive()
-    print(f"  📁 GDrive files found: {len(drive)}", flush=True)
+    # Load artifact state
+    state = load_completed()
+    folders = state.get("folders", {})
+    completed = state.get("completed", [])
+    current_folder = state.get("current_folder")
+    oversized = state.get("oversized", [])
 
+    # Parse MEGA_LINKS JSON
+    if not MEGA_LINKS_RAW.strip():
+        log("ERROR: MEGA_LINKS secret is empty")
+        sys.exit(1)
+
+    try:
+        all_links = json.loads(MEGA_LINKS_RAW)
+    except json.JSONDecodeError as e:
+        log(f"ERROR: MEGA_LINKS is not valid JSON: {e}")
+        log("   Expected: {\"FolderName\": [\"url1\", \"url2\"]}")
+        sys.exit(1)
+
+    if not isinstance(all_links, dict):
+        log("ERROR: MEGA_LINKS must be a JSON object {\"folder\": [urls]}")
+        sys.exit(1)
+
+    # Ensure all folders from secret are in state
+    for folder_name, links in all_links.items():
+        if folder_name not in folders:
+            folders[folder_name] = {
+                "total": len(links),
+                "done": 0,
+                "status": "pending"
+            }
+
+    # Auto-activate first pending folder
+    if not current_folder or current_folder not in folders:
+        for name, fdata in folders.items():
+            if fdata["status"] == "pending":
+                fdata["status"] = "active"
+                current_folder = name
+                state["current_folder"] = name
+                break
+
+    state["folders"] = folders
+    save_completed(state)
+
+    # Build lookup sets
+    completed_urls = set(item["url"] for item in completed)
+    oversized_urls = set(item["url"] for item in oversized)
+
+    # Stats
+    total_pending_all = sum(
+        f["total"] - f["done"] for f in folders.values() if f["status"] != "completed"
+    )
+
+    log("=" * 55)
+    log(f"  MEGA -> GDrive Transfer | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    log("=" * 55)
+    log(f"  Artifact loaded: {len(completed)} completed files, {len(oversized)} oversized")
+    log(f"  Total pending: {total_pending_all}")
+    log("-" * 55)
+    for name, fdata in folders.items():
+        icon = "ACTIVE" if fdata["status"] == "active" else "DONE" if fdata["status"] == "completed" else "WAIT"
+        log(f"  [{icon}] {name}: {fdata['done']}/{fdata['total']}")
+    log("-" * 55)
+
+    if total_pending_all == 0:
+        log(f"\n  ALL FOLDERS COMPLETE! Sab files transfer ho gayi!")
+        log("=" * 55)
+        return
+
+    # Find active folder
+    active_folder = None
+    for name, fdata in folders.items():
+        if fdata["status"] == "active":
+            active_folder = name
+            break
+
+    if not active_folder:
+        log("  No active folder found. Check state.")
+        sys.exit(0)
+
+    folder_links = all_links.get(active_folder, [])
     pending = []
-    for url in valid:
-        key = link_id(url)
-        rec = state.get(key)
-        # Skip if completed in state file
-        if rec and rec.get("status") == "completed":
-            stats["skipped"] += 1
-            continue
-        # Get filename from state or metadata
-        fname = None
-        if rec:
-            fname = rec.get("filename")
-        if not fname:
-            fname, _ = get_metadata(url)
-        # Skip if filename exists on GDrive
-        if fname and fname in drive:
-            stats["skipped"] += 1
-            # Also save to state for future runs
-            state[key] = {"filename": fname, "size": 0, "status": "completed"}
-            save_state(state)
+    for url in folder_links:
+        if url in completed_urls or url in oversized_urls:
             continue
         pending.append(url)
 
-    total = len(valid)
-    done_so_far = stats["skipped"]
-    run_end = datetime.now() + timedelta(seconds=RUN_SECONDS)
+    total = len(pending)
+    log(f"\n  Active: [{active_folder}] -> {total} files pending")
+    log("=" * 55 + "\n")
 
-    print(f"{'═' * 50}", flush=True)
-    print(f"  🟢 MEGA -> Google Drive Transfer", flush=True)
-    print(f"  Total: {total} | Pending: {len(pending)}", flush=True)
-    print(f"  ⏱️  Run for {RUN_SECONDS//60} min, then pause 1 min", flush=True)
-    print(f"  🏁 Stop at: {run_end.strftime('%H:%M:%S')}", flush=True)
-    print(f"{'═' * 50}\n", flush=True)
+    if total == 0:
+        folders[active_folder]["status"] = "completed"
+        folders[active_folder]["done"] = folders[active_folder]["total"]
+        state["folders"] = folders
+        save_completed(state)
+        log(f"  [{active_folder}] already complete. Moving on.")
+        sys.exit(0)
 
-    if done_so_far > 0:
-        show_status(done_so_far, total)
-        print(flush=True)
+    # Process files
+    quota_used = 0
+    processed = 0
 
-    if not pending:
-        print(f"\n🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢", flush=True)
-        print(f"🟢   HURRY 🎉 {total} FILES TRANSFERRED     🟢", flush=True)
-        print(f"🟢   TO GDRIVE! WAh 🎉                  🟢", flush=True)
-        print(f"🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢", flush=True)
-        return
+    for idx, url in enumerate(pending, 1):
+        log(f"  --- [{idx}/{total}] {active_folder} ---")
+        log(f"  Fetching: {url[:60]}...")
 
-    speed_start_time = time.time()
-    speed_start_bytes = 0
-
-    for i, url in enumerate(pending, 1):
-        # Time check
-        if datetime.now() >= run_end:
-            print(f"\n⏱️  7 min window over. Exiting. Cron resumes in 1 min.", flush=True)
-            show_status(done_so_far, total)
-            sys.exit(0)
-
-        key = link_id(url)
-        fname, size = get_metadata(url)
-
-        # Skip if already in Drive
-        if fname and drive.get(fname) == size:
-            state[key] = {"filename": fname, "size": size, "status": "completed"}
-            save_state(state)
-            stats["skipped"] += 1
-            done_so_far += 1
-            print(f"🟡 [{key}] '{fname}' — skip", flush=True)
-            show_status(done_so_far, total)
-            print(flush=True)
+        filename, file_size = get_file_info(url)
+        if not filename or file_size is None:
+            log(f"  Could not get metadata for {url[:50]}... skipping")
             continue
 
-        # Download + Upload
-        display_name = fname or "unknown"
-        print(f"⬇️  [{key}] downloading '{display_name}' ({fmt_size(size)})... [{i}/{len(pending)}]", flush=True)
-        success = False
-        for attempt in range(1, MAX_RETRIES + 1):
-            try:
-                print(f"  📥 Downloading...", flush=True)
-                local = download(url)
-                sz = os.path.getsize(local)
-                print(f"  📤 Uploading to GDrive...", flush=True)
-                name = upload(local)
-                state[key] = {"filename": name, "size": sz, "status": "completed"}
-                save_state(state)
-                stats["downloaded"] += 1
-                done_so_far += 1
-                print(f"  ✅ [{key}] '{name}' ({fmt_size(sz)}) — DONE", flush=True)
-                show_status(done_so_far, total)
-                print(flush=True)
-                success = True
+        log(f"  [{active_folder}] \"{filename}\" | Size: {fmt_size(file_size)}")
+
+        if file_size > QUOTA_MAX:
+            log(f"  OVERSIZED: {filename} ({fmt_size(file_size)}) > 5GB")
+            oversized.append({
+                "url": url, "filename": filename,
+                "size": file_size, "target_folder": active_folder
+            })
+            state["oversized"] = oversized
+            save_completed(state)
+            continue
+
+        if quota_used + file_size > QUOTA_MAX:
+            log(f"  Quota full: {fmt_size(quota_used)} + {fmt_size(file_size)} > 5GB")
+            log(f"  Skipping \"{filename}\" for this run")
+            break
+
+        # Download
+        log(f"  DOWNLOADING: \"{filename}\"...")
+        try:
+            local_path = download_file(url)
+            actual_size = os.path.getsize(local_path)
+            log(f"  Downloaded: {fmt_size(actual_size)}")
+        except RuntimeError as e:
+            msg = str(e)
+            if is_quota(msg):
+                log(f"\n  QUOTA EXCEEDED mid-download! Stopping.")
+                log(f"  {processed} files done this run.")
                 break
-            except RuntimeError as e:
-                msg = str(e)
-                if is_quota(msg):
-                    print(f"\n🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴", flush=True)
-                    print(f"🔴                                      🔴", flush=True)
-                    print(f"🔴   QUOTA OVER 🚫 BANDWIDTH LIMIT      🔴", flush=True)
-                    print(f"🔴   Wait 1 min — Cron auto-resumes!    🔴", flush=True)
-                    print(f"🔴                                      🔴", flush=True)
-                    print(f"🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴", flush=True)
-                    show_status(done_so_far, total)
-                    sys.exit(0)
-                print(f"  🔴 Attempt {attempt}/{MAX_RETRIES}: {msg[:150]}", flush=True)
-                if attempt < MAX_RETRIES:
-                    time.sleep(5 * attempt)
+            log(f"  Download failed: {msg[:200]}")
+            continue
 
-        if not success:
-            stats["failed"] += 1
-            state[key] = {"filename": None, "size": None, "status": "failed"}
-            save_state(state)
-            print(f"  ❌ [{key}] FAILED after {MAX_RETRIES} attempts", flush=True)
-            show_status(done_so_far, total)
-            print(flush=True)
+        quota_used += actual_size
 
-        if os.path.isdir(TEMP_DIR):
-            shutil.rmtree(TEMP_DIR)
+        # Upload
+        log(f"  UPLOADING to GDrive/{BASE_FOLDER}/{active_folder}/...")
+        ensure_gdrive_folder(active_folder)
+        try:
+            uploaded_name = upload_file(local_path, active_folder)
+            log(f"  Uploaded: \"{uploaded_name}\"")
+        except RuntimeError as e:
+            log(f"  Upload failed: {str(e)[:200]}")
+            shutil.rmtree(TEMP_DIR, ignore_errors=True)
+            continue
 
-    # Final
-    completed = sum(1 for v in load_state().values() if v.get("status") == "completed")
-    print(f"\n{'═' * 50}", flush=True)
-    print(f"  📊 RUN REPORT", flush=True)
-    print(f"  🟢 Downloaded : {stats['downloaded']}", flush=True)
-    print(f"  🟡 Skipped    : {stats['skipped']}", flush=True)
-    print(f"  🔴 Failed     : {stats['failed']}", flush=True)
-    print(f"  ⚡ Total data : {fmt_size(total_bytes_downloaded)}", flush=True)
-    print(f"  📁 Total done : {completed}/{total}", flush=True)
-    print(f"{'═' * 50}", flush=True)
+        # Verify
+        log(f"  Verifying...")
+        verified = verify_upload(uploaded_name, actual_size, active_folder)
+        if not verified:
+            log(f"  Verification failed, retrying upload...")
+            time.sleep(5)
+            try:
+                uploaded_name = upload_file(local_path, active_folder)
+            except RuntimeError:
+                shutil.rmtree(TEMP_DIR, ignore_errors=True)
+                continue
+            verified = verify_upload(uploaded_name, actual_size, active_folder)
 
-    if completed >= total:
-        print(f"\n🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢", flush=True)
-        print(f"🟢   HURRY 🎉 {total} FILES TRANSFERRED     🟢", flush=True)
-        print(f"🟢   TO GDRIVE! WAh 🎉                  🟢", flush=True)
-        print(f"🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢", flush=True)
+        if verified:
+            log(f"  VERIFIED: \"{uploaded_name}\" ({fmt_size(actual_size)})")
+        else:
+            log(f"  Could not verify \"{uploaded_name}\" after retry")
+            shutil.rmtree(TEMP_DIR, ignore_errors=True)
+            continue
+
+        # Update artifact
+        completed.append({
+            "url": url,
+            "filename": uploaded_name,
+            "size": actual_size,
+            "target_folder": active_folder,
+            "completed_at": timestamp()
+        })
+        folders[active_folder]["done"] += 1
+        state["completed"] = completed
+        state["folders"] = folders
+        save_completed(state)
+        log(f"  Artifact saved: {folders[active_folder]['done']}/{folders[active_folder]['total']} done")
+
+        # Cleanup
+        shutil.rmtree(TEMP_DIR, ignore_errors=True)
+
+        processed += 1
+        log(f"  [{idx}/{total}] Complete | Quota: {fmt_size(quota_used)}/{fmt_size(QUOTA_MAX)}")
+        log(f"  {'-' * 50}")
+
+    # Folder completion check
+    fdata = folders[active_folder]
+    if fdata["done"] >= fdata["total"]:
+        fdata["status"] = "completed"
+        log(f"\n  FOLDER COMPLETE: [{active_folder}] - {fdata['done']}/{fdata['total']} files")
+        next_folder = None
+        for name, fd in folders.items():
+            if fd["status"] == "pending":
+                fd["status"] = "active"
+                next_folder = name
+                break
+        if next_folder:
+            state["current_folder"] = next_folder
+            fd_next = folders[next_folder]
+            log(f"  Next folder: [{next_folder}] - {fd_next['done']}/{fd_next['total']}")
+        else:
+            state["current_folder"] = None
+            log(f"  ALL FOLDERS COMPLETE! Sab kaam ho gaya!")
+    else:
+        log(f"\n  [{active_folder}] Progress: {fdata['done']}/{fdata['total']}")
+
+    state["folders"] = folders
+    state["completed"] = completed
+    state["oversized"] = oversized
+    save_completed(state)
+
+    # Summary
+    log(f"\n{'=' * 55}")
+    log(f"  RUN SUMMARY")
+    log(f"  {'-' * 55}")
+    log(f"  Processed: {processed} files")
+    log(f"  Quota used: {fmt_size(quota_used)} / {fmt_size(QUOTA_MAX)}")
+    for name, fd in folders.items():
+        icon = "DONE" if fd["status"] == "completed" else "ACTIVE" if fd["status"] == "active" else "WAIT"
+        log(f"  [{icon}] {name}: {fd['done']}/{fd['total']}")
+    if oversized:
+        log(f"  OVERSIZED (>5GB): {len(oversized)} files - manual handling needed")
+    log("=" * 55)
+
+    remaining = sum(fd["total"] - fd["done"] for fd in folders.values() if fd["status"] != "completed")
+    if remaining > 0:
+        log(f"\n  {remaining} files remaining - next cycle will continue")
+        # Signal to workflow that more runs needed
+        print("::notice::More files pending - next cycle will continue")
+    else:
+        log(f"\n  SAB KAAM HO GAYA! :tada:")
 
 
 if __name__ == "__main__":

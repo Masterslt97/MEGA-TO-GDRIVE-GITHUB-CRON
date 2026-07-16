@@ -40,186 +40,209 @@ Instead of scanning GDrive every run (slow, 10-30 sec), we use **GitHub Artifact
 
 ## Complete Flow Diagram
 
-### High-Level Overview
+### Main Workflow (Top-Level View)
 
 `
-                          ┌─────────────────────┐
-                          │  GITHUB ACTIONS      │
-                          │  Cron: */5 * * * *   │
-                          └──────────┬──────────┘
-                                     │ (triggers every 5 min)
-                                     ▼
-                          ┌──────────────────────┐
-                          │  STEP 1: SETUP       │
-                          │  • Install megatools │
-                          │  • Install rclone    │
-                          │  • Write rclone.conf │
-                          └──────────┬───────────┘
-                                     ▼
-                          ┌──────────────────────────────────┐
-                          │  STEP 2: DOWNLOAD ARTIFACT       │
-                          │  actions/download-artifact@v4     │
-                          │  → completed_links.json          │
-                          │  (First run = empty = no error)  │
-                          └──────────┬───────────────────────┘
-                                     ▼
-                          ┌──────────────────────────────────┐
-                          │  STEP 3: READ STATE              │
-                          │  Parse JSON → Find:              │
-                          │  • Completed URLs (skip these)   │
-                          │  • Active folder (process this)  │
-                          │  • Oversized files (ignore)      │
-                          └──────────┬───────────────────────┘
-                                     ▼
-                          ┌──────────────────────────────────┐
-                          │  STEP 4: PARSE MEGA_LINKS        │
-                          │  Secret → JSON parse             │
-                          │  {FolderA: [urls], FolderB:...}  │
-                          │  Filter out already-done URLs    │
-                          └──────────┬───────────────────────┘
-                                     ▼
-                          ┌──────────────────────────────────┐
-                          │  STEP 5: PROCESS EACH FILE       │
-                          │  (one at a time, sequential)     │
-                          └──────────┬───────────────────────┘
-                                     │
-              ┌──────────────────────┼──────────────────────┐
-              ▼                      ▼                      ▼
-     ┌────────────────┐    ┌──────────────┐    ┌──────────────────┐
-     │ 5a. GET INFO   │    │ 5b. QUOTA    │    │ 5c. >5GB FILE?  │
-     │ megadl --info  │───▶│ CHECK        │───▶│ → Mark OVERSIZED │
-     │ filename + size│    │ used+size    │    │ → Skip forever   │
-     │ ~1-2 sec       │    │ ≤ 5GB?       │    └──────────────────┘
-     └────────────────┘    └──────────────┘
-              │                  │ NO                  │
-              │                  ▼                     │
-              │           ⏭️ SKIP this run             │
-              │           (next run retries)           │
-              │                                        │
-              └────────────────┬───────────────────────┘
-                               │ (quota OK + not oversized)
-                               ▼
-              ┌──────────────────────────────────┐
-              │ 5d. DOWNLOAD                     │
-              │ megadl --progress --path TEMP    │
-              │ Progress: %, speed, ETA in logs  │
-              │ quota_used += file_size          │
-              └────────────────┬─────────────────┘
-                               ▼
-              ┌──────────────────────────────────┐
-              │ 5e. UPLOAD TO GDRIVE             │
-              │ rclone mkdir (auto-create folder)│
-              │ rclone copy --progress TEMP/file │
-              │ → gdrive:MEGA_Transfer/Folder/   │
-              │ Progress: %, speed, ETA in logs  │
-              └────────────────┬─────────────────┘
-                               ▼
-              ┌──────────────────────────────────┐
-              │ 5f. VERIFY UPLOAD                │
-              │ rclone lsjson gdrive:.../file    │
-              │ → filename EXACT match?          │
-              │ → size EXACT match?              │
-              │ (Not full scan, just 1 file)     │
-              └────────────────┬─────────────────┘
-                               │
-                    ┌──────────┴──────────┐
-                    ▼                     ▼
-              ┌──────────┐         ┌────────────┐
-              │ MATCH ✅ │         │ NO MATCH ❌│
-              └────┬─────┘         └─────┬──────┘
-                   │                     │
-                   ▼                     ▼
-        ┌────────────────────┐   ┌─────────────────────┐
-        │ 5g. SAVE ARTIFACT  │   │ Retry upload (once) │
-        │ Append to          │   │ Still fail? → skip  │
-        │ completed_links.json│  └─────────────────────┘
-        │ (per-file save!)   │
-        └────────────────────┘
-                   │
-                   ▼
-        ┌────────────────────┐
-        │ 5h. CLEANUP        │
-        │ Delete temp file   │
-        │ Log progress       │
-        └────────────────────┘
-                   │
-                   ▼
-        ┌────────────────────┐
-        │ More files pending?│───Yes──▶ Go to 5a
-        │ OR quota full?     │
-        └────────────────────┘
-                   │ No
-                   ▼
-        ┌──────────────────────────────────┐
-        │ STEP 6: FOLDER COMPLETION CHECK  │
-        │ Active folder done?              │
-        │ YES → Mark "completed"           │
-        │     → Find next "pending" folder │
-        │     → Mark it "active"           │
-        │     → Save state                 │
-        │ NO  → Save progress              │
-        └──────────────────────────────────┘
-                   │
-                   ▼
-        ┌──────────────────────────────────┐
-        │ STEP 7: UPLOAD ARTIFACT          │
-        │ actions/upload-artifact@v4       │
-        │ name: completed-links            │
-        │ path: completed_links.json       │
-        │ (Overwrites previous artifact)   │
-        └──────────────────────────────────┘
-                   │
-                   ▼
-        ┌──────────────────────────────────┐
-        │ STEP 8: GIT BACKUP               │
-        │ git add + commit + push          │
-        │ (Double protection)              │
-        └──────────────────────────────────┘
-                   │
-                   ▼
-        ┌──────────────────────────────────┐
-        │ STEP 9: TRIGGER NEXT CYCLE       │
-        │ gh workflow run                  │
-        │ (If files remaining)             │
-        └──────────────────────────────────┘
-                   │
-                   ▼
-        ┌──────────────────────────────────┐
-        │         WORKFLOW END             │
-        └──────────────────────────────────┘
+    ┌──────────────────────────────────────────┐
+    │          GITHUB ACTIONS CRON              │
+    │          Runs every 5 minutes             │
+    └─────────────────┬────────────────────────┘
+                      │ Trigger
+                      ▼
+    ┌──────────────────────────────────────────┐
+    │  PHASE 1: SETUP                          │
+    │  Install megatools + rclone + Python     │
+    │  Write rclone.conf from secret           │
+    └─────────────────┬────────────────────────┘
+                      │
+                      ▼
+    ┌──────────────────────────────────────────┐
+    │  PHASE 2: LOAD STATE                     │
+    │  Download artifact (completed_links.json)│
+    │  First run = empty = no error            │
+    └─────────────────┬────────────────────────┘
+                      │
+                      ▼
+    ┌──────────────────────────────────────────┐
+    │  PHASE 3: PREPARE                        │
+    │  Parse MEGA_LINKS secret (JSON format)   │
+    │  Identify active folder                  │
+    │  Filter already-completed URLs           │
+    │  Separate oversized files (>5GB)         │
+    └─────────────────┬────────────────────────┘
+                      │
+                      ▼
+    ┌──────────────────────────────────────────┐
+    │  PHASE 4: PROCESS ONE FILE               │
+    │  (See "Per-File Processing" below)       │
+    └─────────────────┬────────────────────────┘
+                      │
+         ┌────────────┴────────────┐
+         ▼                         ▼
+    ┌──────────┐            ┌──────────────┐
+    │ More     │            │ No more      │
+    │ files?   │──YES──────▶│ files /      │
+    │          │            │ quota full?  │
+    └──────────┘            └──────┬───────┘
+         NO                        │ YES
+         │                         │
+         ▼                         ▼
+    ┌──────────────────────────────────────────┐
+    │  PHASE 5: COMPLETE RUN                   │
+    │  1. Check folder completion              │
+    │     If done: mark complete               │
+    │     Activate next folder                 │
+    │  2. Upload artifact (overwrite)          │
+    │  3. Git commit + push (backup)           │
+    │  4. Trigger next cycle if pending        │
+    └─────────────────┬────────────────────────┘
+                      │
+                      ▼
+    ┌──────────────────────────────────────────┐
+    │            WORKFLOW END                  │
+    └──────────────────────────────────────────┘
+`
+
+### Per-File Processing (Detailed)
+
+When Phase 4 starts, each file goes through these steps:
+
+`
+    ┌─────────────────────────────────────────────────────┐
+    │              START PROCESSING ONE FILE               │
+    └─────────────────────────┬───────────────────────────┘
+                              │
+                              ▼
+    ┌─────────────────────────────────────────────────────┐
+    │  STEP A: GET FILE INFO                              │
+    │  ┌───────────────────────────────────────────────┐  │
+    │  │ Run: megadl --info <url>                      │  │
+    │  │ Output: filename + file_size (bytes)          │  │
+    │  │ No download yet - just metadata (~1-2 sec)    │  │
+    │  └───────────────────────────────────────────────┘  │
+    └─────────────────────────┬───────────────────────────┘
+                              │
+                              ▼
+    ┌─────────────────────────────────────────────────────┐
+    │  STEP B: OVERSIZED CHECK                            │
+    │  ┌───────────────────────────────────────────────┐  │
+    │  │ Is file_size > 5GB?                           │  │
+    │  └──────────┬────────────────────┬───────────────┘  │
+    │             │ YES                │ NO               │
+    │             ▼                    │                  │
+    │  ┌──────────────────┐            │                  │
+    │  │ Add to OVERSIZED │            │                  │
+    │  │ list in artifact │            │                  │
+    │  │ Skip forever     │            │                  │
+    │  └──────────────────┘            │                  │
+    └──────────────────────────────────┼──────────────────┘
+                                       │ (only if NOT oversized)
+                                       ▼
+    ┌─────────────────────────────────────────────────────┐
+    │  STEP C: QUOTA CHECK                                │
+    │  ┌───────────────────────────────────────────────┐  │
+    │  │ quota_used + file_size > 5GB?                 │  │
+    │  └──────────┬────────────────────┬───────────────┘  │
+    │             │ YES                │ NO               │
+    │             ▼                    ▼                  │
+    │  ┌──────────────────┐    ┌──────────────────────┐   │
+    │  │ Skip this file   │    │ quota_used += size   │   │
+    │  │ Next run retries │    │ Start download →     │   │
+    │  └──────────────────┘    └──────────────────────┘   │
+    └─────────────────────────────────────────────────────┘
+                              │ (only if quota OK)
+                              ▼
+    ┌─────────────────────────────────────────────────────┐
+    │  STEP D: DOWNLOAD FROM MEGA                         │
+    │  ┌───────────────────────────────────────────────┐  │
+    │  │ megadl --progress --path /tmp/mega_temp       │  │
+    │  │ Shows: % complete, speed (MB/s), ETA          │  │
+    │  │ File saved: /tmp/mega_temp/<filename>         │  │
+    │  │ If quota exceeded mid-download → graceful exit│  │
+    │  └───────────────────────────────────────────────┘  │
+    └─────────────────────────┬───────────────────────────┘
+                              │
+                              ▼
+    ┌─────────────────────────────────────────────────────┐
+    │  STEP E: UPLOAD TO GOOGLE DRIVE                     │
+    │  ┌───────────────────────────────────────────────┐  │
+    │  │ 1. Create folder if not exists:               │  │
+    │  │    rclone mkdir gdrive:MEGA_Transfer/Folder   │  │
+    │  │ 2. Upload file:                               │  │
+    │  │    rclone copy --progress <file> <gdrive:/>   │  │
+    │  │ Shows: % complete, speed (MB/s), ETA          │  │
+    │  └───────────────────────────────────────────────┘  │
+    └─────────────────────────┬───────────────────────────┘
+                              │
+                              ▼
+    ┌─────────────────────────────────────────────────────┐
+    │  STEP F: VERIFY UPLOAD                              │
+    │  ┌───────────────────────────────────────────────┐  │
+    │  │ rclone lsjson gdrive:.../<filename>           │  │
+    │  │                                                │  │
+    │  │ Check: filename EXACTLY match?                 │  │
+    │  │        file size EXACTLY match?                │  │
+    │  │ (Not a full GDrive scan - just 1 file check)   │  │
+    │  └──────────┬────────────────────┬───────────────┘  │
+    │             │ YES                │ NO               │
+    │             ▼                    ▼                  │
+    │  ┌──────────────────┐    ┌──────────────────────┐   │
+    │  │ Upload VERIFIED  │    │ Retry upload 1 time  │   │
+    │  │ ✅ Proceed       │    │ Still fail? → skip   │   │
+    │  └──────────────────┘    │ and continue         │   │
+    │                          └──────────────────────┘   │
+    └─────────────────────────────────────────────────────┘
+                              │ (only if verified OK)
+                              ▼
+    ┌─────────────────────────────────────────────────────┐
+    │  STEP G: SAVE TO ARTIFACT                           │
+    │  ┌───────────────────────────────────────────────┐  │
+    │  │ Append to completed_links.json:               │  │
+    │  │ - url, filename, size                         │  │
+    │  │ - target_folder, completed_at                 │  │
+    │  │ Save to disk immediately!!!                    │  │
+    │  │ (Per-file save = crash-proof design)          │  │
+    │  └───────────────────────────────────────────────┘  │
+    └─────────────────────────┬───────────────────────────┘
+                              │
+                              ▼
+    ┌─────────────────────────────────────────────────────┐
+    │  STEP H: CLEANUP & LOG                              │
+    │  ┌───────────────────────────────────────────────┐  │
+    │  │ 1. Delete: /tmp/mega_temp/<file>              │  │
+    │  │ 2. Print: "5/10 done | Quota: 3.4/5.0 GB"    │  │
+    │  └───────────────────────────────────────────────┘  │
+    └─────────────────────────┬───────────────────────────┘
+                              │
+                              ▼
+    ┌─────────────────────────────────────────────────────┐
+    │  Return to "More files?" check in Main Diagram      │
+    └─────────────────────────────────────────────────────┘
 `
 
 ### Multi-Run Progression Example
 
 `
-RUN 1 (fresh):
-  Artifact: empty
-  MEGA_LINKS: {Bollywood: [10 links], Hollywood: [5 links]}
-  State: Bollywood → active, Hollywood → pending
-  
-  Process Bollywood links 1-5 (quota exhausted at 4.8GB)
-  Save artifact: 5/10 done, Bollywood still active
-  
-RUN 2 (fresh quota):
-  Download artifact: 5 completed
-  Skip links 1-5 → Process links 6-10 (quota: 4.2GB)
-  Bollywood: 10/10 → COMPLETED!
-  Auto-advance: Hollywood → active
-  
-RUN 3 (fresh quota):
-  Download artifact: 10 completed
-  Process Hollywood links 1-3 (quota: 3.1GB)
-  Hollywood: 3/5 done
-  
-RUN 4 (fresh quota):
-  Download artifact: 13 completed
-  Process Hollywood links 4-5
-  Hollywood: 5/5 → COMPLETED!
-  ALL DONE! 🎉
+        RUN 1                        RUN 2                        RUN 3                        RUN 4
+  ┌──────────────────┐      ┌──────────────────┐      ┌──────────────────┐      ┌──────────────────┐
+  │ Artifact: empty  │      │ Artifact: 5 done │      │ Artifact:10 done │      │ Artifact:13 done │
+  │                  │      │                  │      │                  │      │                  │
+  │ Bollywood: 10   │      │ Bollywood: 10   │      │ Bollywood:10 ✅ │      │ Hollywood:5 ✅  │
+  │ Hollywood: 5    │      │ Hollywood: 5    │      │ Hollywood:5 ▶️ │      │                  │
+  │                  │      │                  │      │                  │      │                  │
+  │ Process: 1-5    │      │ Process: 6-10   │      │ Process: 1-3    │      │ Process: 4-5    │
+  │ (quota: 4.8GB)  │      │ (quota: 4.2GB)  │      │ (quota: 3.1GB)  │      │ (quota: 2.1GB)  │
+  │                  │      │                  │      │                  │      │                  │
+  │ Bollywood:5/10  │      │ Bollywood:10/10 │      │ Hollywood:3/5   │      │ Hollywood:5/5   │
+  │ Hollywood: wait │      │ Hollywood: wait │      │                  │      │                  │
+  └──────────────────┘      └──────────────────┘      └──────────────────┘      └──────────────────┘
+                                                                                                      │
+                                                                                                      ▼
+                                                                                             ┌──────────────────┐
+                                                                                             │   ALL DONE !    │
+                                                                                             │  30/30 files    │
+                                                                                             └──────────────────┘
 `
-
----
-
 ## Artifact System Explained
 
 ### What is an Artifact?
@@ -708,3 +731,4 @@ MEGA-TO-GDRIVE-GITHUB-CRON/
 ## License
 
 Free to use. Made by Shivam.
+

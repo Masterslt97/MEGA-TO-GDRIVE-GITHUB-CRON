@@ -12,6 +12,11 @@ from datetime import datetime, timezone
 
 MEGA_LINKS_RAW = os.environ.get("MEGA_LINKS", "")
 RCLONE_CONF_RAW = os.environ.get("RCLONE_CONF", "")
+
+# mega.py uses deprecated asyncio.coroutine — restore if missing
+import asyncio
+if not hasattr(asyncio, "coroutine"):
+    asyncio.coroutine = lambda c: c
 GDRIVE_REMOTE = "gdrive"
 BASE_FOLDER = "MEGA_Transfer"
 QUOTA_MAX = 5 * 1024 * 1024 * 1024
@@ -102,7 +107,7 @@ def download_file(url):
         log(f"  [debug] {err}")
         print(f"::error::download_file: {err[:200]}")
     r = subprocess.run(
-        ["megadl", "--progress", "--path", TEMP_DIR, url],
+        ["megadl", "--path", TEMP_DIR, url],
         capture_output=True, text=True, timeout=3600
     )
     if r.stdout:

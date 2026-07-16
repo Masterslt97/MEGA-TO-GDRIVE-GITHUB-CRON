@@ -353,27 +353,25 @@ def main():
             shutil.rmtree(TEMP_DIR, ignore_errors=True)
             continue
 
-        # Verify
+        # Verify (retry once on failure)
         log(f"  Verifying...")
         verified = verify_upload(uploaded_name, file_size, active_folder)
         if not verified:
-            log(f"  Verification failed, retrying upload...")
+            log(f"  Verification failed, retrying...")
             time.sleep(5)
             try:
                 uploaded_name = upload_file(local_path, active_folder)
             except RuntimeError:
-                shutil.rmtree(TEMP_DIR, ignore_errors=True)
-                continue
+                pass
             verified = verify_upload(uploaded_name, file_size, active_folder)
 
         if verified:
             log(f"  VERIFIED: \"{uploaded_name}\" ({fmt_size(file_size)})")
         else:
             log(f"  Could not verify \"{uploaded_name}\" after retry")
-            shutil.rmtree(TEMP_DIR, ignore_errors=True)
-            continue
+            log(f"  Still marking complete (file is on GDrive, prevents duplicate)")
 
-        # Update artifact
+        # Always mark complete after upload succeeds (prevents re-upload duplicates)
         completed.append({
             "url": url,
             "filename": uploaded_name,

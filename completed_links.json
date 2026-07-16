@@ -1,1 +1,24 @@
-{"folders": {}}
+{
+  "folders": {
+    "Shorts": {
+      "total": 45,
+      "done": 1,
+      "status": "active"
+    },
+    "Beautiful Girls": {
+      "total": 208,
+      "done": 0,
+      "status": "pending"
+    }
+  },
+  "current_folder": "Shorts",
+  "completed": [
+    {
+      "url": "https://mega.nz/file/31wyBQyb#qah-zh8gRoG1x0OG-zPRFx1PUnDCPaSrcjp0-bGoURg",
+      "filename": "18061_720p.mp4",
+      "size": 95400728,
+      "target_folder": "Shorts",
+      "completed_at": "2026-07-16T17:36:47Z"
+    }
+  ]
+}

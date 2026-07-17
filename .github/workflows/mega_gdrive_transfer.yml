@@ -2,6 +2,8 @@ name: MEGA to Google Drive Transfer
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '*/15 * * * *'
 
 concurrency:
   group: mega-transfer-single
@@ -14,7 +16,7 @@ permissions:
 jobs:
   transfer:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 60
 
     steps:
       - name: Checkout repo
@@ -71,7 +73,7 @@ jobs:
           git push
 
       - name: Auto-trigger next if files remain
-        if: success() || failure()
+        if: always()
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
         run: python auto_trigger.py

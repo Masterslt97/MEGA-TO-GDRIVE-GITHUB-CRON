@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -38,12 +39,17 @@ def fmt_size(b):
     return f"{b:.1f} PB"
 
 
+def parse_size_num(val, unit):
+    units = {"B": 1, "KiB": 1024, "MiB": 1024**2, "GiB": 1024**3, "TiB": 1024**4}
+    return float(val) * units.get(unit, 1)
+
+
 def is_quota(text):
     return any(m in text.lower() for m in QUOTA_MARKERS)
 
 
-def log(msg):
-    print(msg, flush=True)
+def log(msg, end='\n'):
+    print(msg, flush=True, end=end)
 
 
 def git_push(quiet=False):
@@ -124,23 +130,58 @@ def get_file_info(url):
     return None, None
 
 
-def download_file(url, timeout=600):
+def download_file(url, timeout=600, quota_used=0, quota_max=0):
     if os.path.isdir(TEMP_DIR):
         shutil.rmtree(TEMP_DIR)
     os.makedirs(TEMP_DIR, exist_ok=True)
+
+    process = subprocess.Popen(
+        ["megadl", "--print-progress", "--path", TEMP_DIR, url],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, bufsize=1
+    )
+
+    output = []
+    last_line = ""
+
+    def reader():
+        nonlocal last_line
+        for line in process.stdout:
+            output.append(line)
+            line_s = line.rstrip()
+            if line_s.startswith("PROGRESS:"):
+                m = re.search(r"([\d.]+)\s+(B|[KMG]i?B)\s+/\s+([\d.]+)\s+(B|[KMG]i?B)\s+\((\d+)%\)", line_s)
+                if m:
+                    cur_dl = parse_size_num(m.group(1), m.group(2))
+                    cur_str = fmt_size(cur_dl)
+                    total = fmt_size(parse_size_num(m.group(3), m.group(4)))
+                    pct = m.group(5)
+                    q_str = fmt_size(quota_used + cur_dl)
+                    line_text = f"  [DOWNLOAD] {cur_str} / {total} ({pct}%) | Quota: {q_str}/{fmt_size(quota_max)}"
+                    if line_text != last_line:
+                        log(line_text, end='\r')
+                        last_line = line_text
+
+    thread = threading.Thread(target=reader, daemon=True)
+    thread.start()
+
     try:
-        r = subprocess.run(
-            ["megadl", "--path", TEMP_DIR, url],
-            capture_output=True, text=True, timeout=timeout
-        )
-        if r.returncode != 0:
-            raise RuntimeError((r.stdout + r.stderr).strip() or f"megadl exit {r.returncode}")
-        files = [f for f in os.listdir(TEMP_DIR) if os.path.isfile(os.path.join(TEMP_DIR, f))]
-        if not files:
-            raise RuntimeError("No file downloaded")
-        return os.path.join(TEMP_DIR, files[0])
+        process.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
+        process.kill()
+        thread.join(timeout=3)
         raise RuntimeError("megadl timed out")
+
+    thread.join(timeout=3)
+    log("")  # newline after progress
+
+    if process.returncode != 0:
+        raise RuntimeError("".join(output).strip() or f"megadl exit {process.returncode}")
+
+    files = [f for f in os.listdir(TEMP_DIR) if os.path.isfile(os.path.join(TEMP_DIR, f))]
+    if not files:
+        raise RuntimeError("No file downloaded")
+    return os.path.join(TEMP_DIR, files[0])
 
 
 def ensure_gdrive_folder(folder_name):
@@ -156,18 +197,52 @@ def ensure_gdrive_folder(folder_name):
         log(f"  warning: rclone mkdir failed (non-fatal)")
 
 
-def upload_file(filepath, folder_name):
+def upload_file(filepath, folder_name, quota_used=0, quota_max=0):
     target = f"{GDRIVE_REMOTE}:{BASE_FOLDER}/{folder_name}/"
+
+    process = subprocess.Popen(
+        ["rclone", "copy", filepath, target, "--stats=3s"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, bufsize=1
+    )
+
+    file_size = os.path.getsize(filepath)
+    last_line = ""
+
+    def reader():
+        nonlocal last_line
+        for line in process.stderr:
+            line_s = line.rstrip()
+            if "Transferred:" in line_s and "/" in line_s:
+                m = re.search(r"Transferred:\s*([\d.]+)\s*(B|[KMG]i?B)\s*/\s*([\d.]+)\s*(B|[KMG]i?B)", line_s)
+                if m:
+                    cur = m.group(1) + " " + m.group(2)
+                    total = m.group(3) + " " + m.group(4)
+                    pct_match = re.search(r",\s*(\d+)%", line_s)
+                    pct = pct_match.group(1) if pct_match else "?"
+                    q_str = fmt_size(quota_used + file_size)
+                    line_text = f"  [UPLOAD] {cur} / {total} ({pct}%) | Quota: {q_str}/{fmt_size(quota_max)}"
+                    if line_text != last_line:
+                        log(line_text, end='\r')
+                        last_line = line_text
+
+    thread = threading.Thread(target=reader, daemon=True)
+    thread.start()
+
     try:
-        r = subprocess.run(
-            ["rclone", "copy", filepath, target],
-            capture_output=True, text=True, timeout=3600
-        )
-        if r.returncode != 0:
-            raise RuntimeError((r.stderr or r.stdout).strip()[:300] or f"rclone copy exit {r.returncode}")
-        return os.path.basename(filepath)
+        process.wait(timeout=3600)
     except subprocess.TimeoutExpired:
+        process.kill()
+        thread.join(timeout=3)
         raise RuntimeError("rclone copy timed out")
+
+    thread.join(timeout=3)
+    log("")  # newline after progress
+
+    stdout_text = process.stdout.read()
+    if process.returncode != 0:
+        raise RuntimeError((stdout_text or "").strip()[:300] or f"rclone copy exit {process.returncode}")
+    return os.path.basename(filepath)
 
 
 def verify_upload(filename, file_size, folder_name):
@@ -333,7 +408,7 @@ def main():
         dl_start = time.time()
         log(f"  DOWNLOADING: \"{filename or '?'}\" ({fmt_size(file_size or 0)})...")
         try:
-            local_path = download_file(url)
+            local_path = download_file(url, timeout=600, quota_used=quota_used, quota_max=QUOTA_MAX)
             actual_size = os.path.getsize(local_path)
             actual_name = os.path.basename(local_path)
             dl_elapsed = time.time() - dl_start
@@ -374,7 +449,7 @@ def main():
         log(f"  UPLOADING: \"{filename}\" ({fmt_size(file_size)}) to GDrive/{BASE_FOLDER}/{active_folder}/...")
         ensure_gdrive_folder(active_folder)
         try:
-            uploaded_name = upload_file(local_path, active_folder)
+            uploaded_name = upload_file(local_path, active_folder, quota_used=quota_used, quota_max=QUOTA_MAX)
             ul_elapsed = time.time() - ul_start
             log(f"  Uploaded: \"{uploaded_name}\" ({fmt_size(file_size)} in {ul_elapsed:.0f}s)")
         except RuntimeError as e:

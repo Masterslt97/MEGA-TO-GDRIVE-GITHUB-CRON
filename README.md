@@ -341,6 +341,20 @@ Next Run → git pull → File 1,2 already in state → Skip!
 
 ---
 
+## 🔑 Required GitHub Secrets (Must-Know Before You Start)
+
+Workflow ko run karne ke liye **3 GitHub Secrets** banane zaroori hain. Secrets ke bina workflow fail ho jayega.
+
+| Secret Name | Required? | Kya Hai? | Kaise Milega? |
+|-------------|-----------|----------|---------------|
+| `MEGA_LINKS` | ✅ Required | Aapki MEGA files ka JSON — `{"Folder":["url1","url2"]}` | Khud banani hogi (neeche method diya hai) |
+| `RCLONE_CONF` | ✅ Required | rclone config file content | `rclone config show gdrive` command se |
+| `GH_PAT` | ✅ Required | GitHub Personal Access Token | GitHub → Settings → Developer settings → Personal access tokens |
+
+> ⚠️ **Important:** `GH_PAT` token ke liye **`repo`** aur **`workflow`** permissions select karna zaroori hai. Iss token ka use auto-trigger next cycle ke liye hota hai.
+
+---
+
 ## Setup Guide
 
 ### Prerequisites
@@ -491,6 +505,28 @@ client_secret = X4Z3ca8xfWDb1Voo-F9a7ZxJ
 scope = drive
 token = {"access_token":"...","refresh_token":"..."}
 ```
+
+#### Secret 3: GH_PAT (GitHub Personal Access Token)
+
+Auto-trigger feature ke liye zaroori hai. Jab ek run khatam hota hai aur files remaining hoti hain, toh yeh token next cycle automatically trigger karta hai.
+
+**Kaise banayein:**
+1. GitHub → **Settings** (top right profile menu)
+2. **Developer settings** → **Personal access tokens** → **Tokens (classic)**
+3. **Generate new token (classic)** click karo
+4. Name: `MEGA_TRANSFER_PAT`
+5. Expiration: **No expiration** (ya jitna chaho)
+6. **Permissions (select karo):**
+   - [x] **`repo`** — Full control of private repositories
+   - [x] **`workflow`** — Update GitHub Action workflows
+7. **Generate token** click karo
+8. Token copy karo (phir kabhi nahi dikhega!)
+9. Apne repo mein jao → **Settings → Secrets and variables → Actions → New repository secret**
+10. Name: `GH_PAT`, Value: (token paste karo) → **Add secret**
+
+> ⚠️ **Note:** Token ke bina auto-trigger kaam nahi karega. Workflow manually tab hi chalana padega. Files transfer toh hongi, par har run ke baad aapko khud "Run workflow" click karna hoga.
+
+---
 
 ### Step 4: Run the Workflow
 

@@ -7,7 +7,7 @@
     },
     "Beautiful Girls": {
       "total": 208,
-      "done": 35,
+      "done": 36,
       "status": "active"
     }
   },
@@ -572,6 +572,13 @@
       "size": 851945913,
       "target_folder": "Beautiful Girls",
       "completed_at": "2026-07-17T01:01:27Z"
+    },
+    {
+      "url": "https://mega.nz/file/mfpl1IwI#0aZywWkA8MtJo0E8nKOnmdwEjl1Y0qah8v_v7Q3hX3g",
+      "filename": "bbc-pova_1080p.mp4",
+      "size": 714930941,
+      "target_folder": "Beautiful Girls",
+      "completed_at": "2026-07-17T01:10:59Z"
     }
   ],
   "oversized": [

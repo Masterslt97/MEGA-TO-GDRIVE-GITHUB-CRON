@@ -130,39 +130,41 @@ def get_file_info(url):
     return None, None
 
 
-def download_file(url, timeout=600, quota_used=0, quota_max=0):
+def download_file(url, timeout=600, quota_used=0, quota_max=0, total_size=0):
     if os.path.isdir(TEMP_DIR):
         shutil.rmtree(TEMP_DIR)
     os.makedirs(TEMP_DIR, exist_ok=True)
 
     process = subprocess.Popen(
-        ["megadl", "--print-progress", "--path", TEMP_DIR, url],
+        ["megadl", "--path", TEMP_DIR, url],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, bufsize=1
+        text=True
     )
 
     output = []
     last_line = ""
+    start = time.time()
 
-    def reader():
+    def monitor():
         nonlocal last_line
-        for line in process.stdout:
-            output.append(line)
-            line_s = line.rstrip()
-            if line_s.startswith("PROGRESS:"):
-                m = re.search(r"([\d.]+)\s+(B|[KMG]i?B)\s+/\s+([\d.]+)\s+(B|[KMG]i?B)\s+\((\d+)%\)", line_s)
-                if m:
-                    cur_dl = parse_size_num(m.group(1), m.group(2))
-                    cur_str = fmt_size(cur_dl)
-                    total = fmt_size(parse_size_num(m.group(3), m.group(4)))
-                    pct = m.group(5)
-                    q_str = fmt_size(quota_used + cur_dl)
-                    line_text = f"  [DOWNLOAD] {cur_str} / {total} ({pct}%) | Quota: {q_str}/{fmt_size(quota_max)}"
+        while process.poll() is None:
+            if os.path.isdir(TEMP_DIR):
+                files = [f for f in os.listdir(TEMP_DIR) if os.path.isfile(os.path.join(TEMP_DIR, f))]
+                if files:
+                    cur_size = os.path.getsize(os.path.join(TEMP_DIR, files[0]))
+                    elapsed = time.time() - start
+                    speed = cur_size / elapsed if elapsed > 0 else 0
+                    if total_size > 0:
+                        pct = min(100.0, cur_size * 100 / total_size)
+                        line_text = f"  [DOWNLOAD] {fmt_size(cur_size)} / {fmt_size(total_size)} ({pct:.0f}%) @ {fmt_size(speed)}/s | Quota: {fmt_size(quota_used + cur_size)}/{fmt_size(quota_max)}"
+                    else:
+                        line_text = f"  [DOWNLOAD] {fmt_size(cur_size)} downloaded @ {fmt_size(speed)}/s | Quota: {fmt_size(quota_used + cur_size)}/{fmt_size(quota_max)}"
                     if line_text != last_line:
                         log(line_text, end='\r')
                         last_line = line_text
+            time.sleep(2)
 
-    thread = threading.Thread(target=reader, daemon=True)
+    thread = threading.Thread(target=monitor, daemon=True)
     thread.start()
 
     try:
@@ -173,10 +175,11 @@ def download_file(url, timeout=600, quota_used=0, quota_max=0):
         raise RuntimeError("megadl timed out")
 
     thread.join(timeout=3)
-    log("")  # newline after progress
+    log("")
 
     if process.returncode != 0:
-        raise RuntimeError("".join(output).strip() or f"megadl exit {process.returncode}")
+        out = "".join(output)
+        raise RuntimeError(out.strip() or f"megadl exit {process.returncode}")
 
     files = [f for f in os.listdir(TEMP_DIR) if os.path.isfile(os.path.join(TEMP_DIR, f))]
     if not files:
@@ -408,7 +411,7 @@ def main():
         dl_start = time.time()
         log(f"  DOWNLOADING: \"{filename or '?'}\" ({fmt_size(file_size or 0)})...")
         try:
-            local_path = download_file(url, timeout=600, quota_used=quota_used, quota_max=QUOTA_MAX)
+            local_path = download_file(url, timeout=600, quota_used=quota_used, quota_max=QUOTA_MAX, total_size=file_size or 0)
             actual_size = os.path.getsize(local_path)
             actual_name = os.path.basename(local_path)
             dl_elapsed = time.time() - dl_start

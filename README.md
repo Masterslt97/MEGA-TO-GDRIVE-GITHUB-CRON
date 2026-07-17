@@ -4,8 +4,38 @@ Multi-folder file transfer system from MEGA to Google Drive using GitHub Actions
 
 ---
 
+## 🔑 Required GitHub Secrets (Pehle Ye Samjho)
+
+Workflow chalane ke liye **3 GitHub Secrets** banane padenge. Inke bina workflow fail hoga.
+
+| Secret Name | Required? | Kya Hai? | Kaise Milega? |
+|-------------|-----------|----------|---------------|
+| `MEGA_LINKS` | ✅ Required | Aapki MEGA files ka JSON — `{"Folder":["url1","url2"]}` | **Web Tool se banao** (neeche link hai) ya manually |
+| `RCLONE_CONF` | ✅ Required | rclone config file content | `rclone config show gdrive` command se |
+| `GH_PAT` | ✅ Required | GitHub Personal Access Token | GitHub → Settings → Developer settings → Personal access tokens |
+
+> ⚠️ **Important:** `GH_PAT` token ke liye **`repo`** aur **`workflow`** permissions select karna zaroori hai.
+
+### 🛠️ MEGA_LINKS Banane Ka Easy Tarika
+
+Manual JSON banana mushkil hai. Isliye yeh **free web tool** bana diya hai:
+
+🔗 **[https://megajsonlinksgenerator-kappa.vercel.app/](https://megajsonlinksgenerator-kappa.vercel.app/)**
+
+**Kaise use karein:**
+1. Link kholo — **Folder Name** daalo (e.g. "Movies")
+2. **MEGA links** paste karo textarea mein (har line par ek URL)
+3. **"+ Add Folder"** click karo
+4. Jitne folders chahein utne add karo
+5. **"🚀 Generate Secret"** click karo — minified JSON ban jayega
+6. **📋 Copy** karo → GitHub Secret `MEGA_LINKS` mein paste karo
+7. **(Bonus)** **🔄 Reset State** — `{"folders": {}}` copy karein → `completed_links.json` reset karne ke liye
+
+---
+
 ## 📋 Table of Contents
 
+- [Required Secrets](#-required-github-secrets-pehle-ye-samjho)
 - [How It Works](#how-it-works)
 - [Complete Flow Diagram](#complete-flow-diagram)
 - [Artifact System Explained](#artifact-system-explained)
@@ -342,18 +372,6 @@ Next Run → git pull → File 1,2 already in state → Skip!
 ---
 
 ## 🔑 Required GitHub Secrets (Must-Know Before You Start)
-
-Workflow ko run karne ke liye **3 GitHub Secrets** banane zaroori hain. Secrets ke bina workflow fail ho jayega.
-
-| Secret Name | Required? | Kya Hai? | Kaise Milega? |
-|-------------|-----------|----------|---------------|
-| `MEGA_LINKS` | ✅ Required | Aapki MEGA files ka JSON — `{"Folder":["url1","url2"]}` | Khud banani hogi (neeche method diya hai) |
-| `RCLONE_CONF` | ✅ Required | rclone config file content | `rclone config show gdrive` command se |
-| `GH_PAT` | ✅ Required | GitHub Personal Access Token | GitHub → Settings → Developer settings → Personal access tokens |
-
-> ⚠️ **Important:** `GH_PAT` token ke liye **`repo`** aur **`workflow`** permissions select karna zaroori hai. Iss token ka use auto-trigger next cycle ke liye hota hai.
-
----
 
 ## Setup Guide
 
